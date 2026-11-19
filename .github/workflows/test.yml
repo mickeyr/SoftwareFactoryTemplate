@@ -1,0 +1,50 @@
+name: Test
+
+# The factory's scripts must run on Linux, macOS and Windows, and only this
+# workflow runs them on all three.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+jobs:
+  test:
+    name: Factory tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      # The scripts switch themselves to UTF-8 mode on Windows; the tests load them as modules, so they need it set.
+      PYTHONUTF8: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.10"
+
+      - name: Run the factory's tests
+        shell: bash
+        working-directory: template
+        run: python -m unittest discover -s factory/tests -v
+
+      # What INSTALL.md's copy step produces; the agent does the copying in a real install.
+      - name: Run from a copy in an empty repository
+        shell: bash
+        run: |
+          git init -q "$RUNNER_TEMP/target"
+          cp -R template/. optional/cloud/. optional/dependabot/. "$RUNNER_TEMP/target"
+          cd "$RUNNER_TEMP/target"
+          python -m unittest discover -s factory/tests
+          (python factory/bin/gate 2>&1 || true) | grep -q "gate <job-id>"

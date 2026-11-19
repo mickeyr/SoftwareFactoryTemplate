@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""The deterministic gate: does the job's branch pass the repo's checks?
+
+Usage:
+  gate <job-id>                  write round-N/checks.md; exit 0 on PASS, 1 on FAIL
+  gate <job-id> --merge          same, as round-N/merge-checks.md (job merge runs it)
+  gate <job-id> --update         same, as round-N/update-checks.md (job update runs it)
+  gate <job-id> --checks         run checks.sh in the job's worktree; exit with its code,
+                                 or 1 if it passed but named another job's worktree
+  gate <job-id> --integration    run config.json's `integration.command` for the branch's
+                                 changed integration test files; exit 0 on pass or skip,
+                                 1 on failure
+  gate --hook                    builder Stop hook: run the checks once, exit 2 on failure
+
+The gate runs the main checkout's factory/checks.sh inside the job's worktree,
+so a branch can't change the checks it is judged by. It also fails when the
+branch modifies or deletes a file matching config.json `protected_paths`
+(fnmatch patterns, where `*` also matches `/`). Adding new files is fine.
+
+When checks.sh passes, the gate runs the repo's integration tests for the files
+the branch adds or changes that match config.json `integration.paths` (fnmatch
+patterns). No matching file, no run. `integration.command` is the command, as
+an argument list run without a shell inside the job's worktree; an argument
+that is exactly `{files}` is replaced by the matching files. It is either one
+list for every platform or an object with a list per platform (`linux`,
+`macos`, `windows`, and `default` for the rest). It comes from the main
+checkout's config.json, so a branch can't change the command it is judged by.
+Every mode that runs checks.sh or integration tests holds a lock on the
+worktree, and integration runs also hold one machine-wide lock, so runs never
+overlap in a worktree and heavy integration runs never overlap at all.
+
+With config.json `integration.docker` true, the gate checks `docker info`
+first. In a Claude Code cloud session (CLAUDE_CODE_REMOTE=true), dockerd isn't
+running when the session starts, so when `docker info` fails the gate starts
+dockerd itself, logging to factory/jobs/dockerd.log, and leaves it running. On
+any machine, an integration run that failed because Docker Hub refused an image
+pull with its rate limit is run again, up to RATE_LIMIT_ATTEMPTS times in all.
+
+Several jobs build at once. Every mode fails when the output of checks.sh or
+of the integration command names another job's worktree (a `.worktrees/<name>` path other
+than the job's own), even when they exited 0: a shared build daemon or cache
+served the wrong checkout. Turn such daemons off in checks.sh itself.
+"""
+
+import fnmatch
+import json
+import os
+import platform
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import portable  # noqa: E402
+
+REPO = Path(__file__).resolve().parents[2]
+FACTORY = REPO / "factory"
+CONFIG = json.loads((FACTORY / "config.json").read_text())
+CHECKS = FACTORY / "checks.sh"
+TAIL = 80
+INTEGRATION_CONFIG = CONFIG.get("integration", {})
+INTEGRATION_PATHS = INTEGRATION_CONFIG.get("paths", [])
+INTEGRATION_COMMAND = INTEGRATION_CONFIG.get("command", [])
+PLATFORM = {"Linux": "linux", "Darwin": "macos", "Windows": "windows"}.get(platform.system(), platform.system().lower())
+INTEGRATION_DOCKER = INTEGRATION_CONFIG.get("docker", False)
+INTEGRATION_LIMIT = INTEGRATION_CONFIG.get("timeout_seconds", 20 * 60)
+# Every job's gate runs the main checkout's copy of this script, so a lock under its
+# jobs folder serializes them all, without the shared temp directory's symlink risks.
+INTEGRATION_LOCK = FACTORY / "jobs" / "integration.lock"
+DOCKERD_LOG = FACTORY / "jobs" / "dockerd.log"
+DOCKERD_WAIT = 30
+RATE_LIMIT_ATTEMPTS = 3
+RATE_LIMIT_WAIT = 30
+WORKTREE_NAME = re.compile(r"\.worktrees[/\\]([^/\\\s\"'`:;,()<>\[\]]+)")
+# For each gate run that writes a verdict: the verdict's file name, the integration log's
+# name and what the summary adds to the commit line.
+VERDICT_MODES = {
+    "gate": ("checks", "integration.log", ""),
+    "--merge": ("merge-checks", "merge-integration.log",
+                f", synced with the latest {CONFIG['base_branch']} before merging"),
+    "--update": ("update-checks", "update-integration.log",
+                 f", brought up to date with the latest {CONFIG['base_branch']} by job update"),
+}
+
+
+def die(msg):
+    print(f"gate: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def git(worktree, *args):
+    res = subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True)
+    if res.returncode != 0:
+        die(f"`git {' '.join(args)}` failed: {res.stderr.strip()}")
+    return res.stdout
+
+
+def lock(path, holder, what):
+    """Take an exclusive lock on path, waiting if needed. The system drops it when this process exits or dies."""
+    return portable.lock_named(
+        path, holder, lambda held_by: print(f"gate: waiting for {what}, held by {held_by}", file=sys.stderr, flush=True))
+
+
+def lock_worktree(worktree, mode):
+    git_dir = git(worktree, "rev-parse", "--absolute-git-dir").strip()
+    lock(Path(git_dir) / "factory-gate.lock", f"gate {mode} (pid {os.getpid()})",
+         f"the worktree lock on {worktree}")
+
+
+def foreign_worktrees(worktree, output):
+    """Other jobs' worktree names that output names as `.worktrees/<name>`, each with the first line naming it."""
+    path = Path(worktree)
+    own = path.name if path.parent.name == ".worktrees" else None
+    found = {}
+    for line in output.splitlines():
+        for name in WORKTREE_NAME.findall(line):
+            if name != own and name not in found:
+                found[name] = line.strip()
+    return list(found.items())
+
+
+def foreign_lines(foreign):
+    return [f"- .worktrees/{name}: {line}" for name, line in foreign]
+
+
+def load_job(job_id):
+    return json.loads((FACTORY / "jobs" / job_id / "job.json").read_text())
+
+
+def protected_changes(worktree):
+    """Existing files under protected_paths that the branch modified or deleted."""
+    diff = git(worktree, "diff", "--name-status", f"origin/{CONFIG['base_branch']}...HEAD")
+    hits = []
+    for line in diff.splitlines():
+        status, *paths = line.split("\t")
+        if status.startswith("A"):
+            continue
+        old = paths[0]  # for renames and copies, the original path
+        if any(fnmatch.fnmatch(old, pattern) for pattern in CONFIG["protected_paths"]):
+            hits.append(f"{status[0]} {old}")
+    return hits
+
+
+def bash():
+    return portable.bash() or die("bash is not on PATH, and factory/checks.sh needs it. On Windows, install Git for "
+                                  "Windows, which brings Git Bash.")
+
+
+def run_checks(worktree):
+    start = time.monotonic()
+    res = subprocess.run([bash(), str(CHECKS)], cwd=worktree, capture_output=True, text=True)
+    return res.returncode, res.stdout + res.stderr, int(time.monotonic() - start)
+
+
+def changed_integration_files(worktree):
+    """Files the branch added, modified or renamed that match `integration.paths`; deletions don't count."""
+    # Unquoted paths, so a file with an unusual name still matches its pattern.
+    diff = git(worktree, "-c", "core.quotePath=false", "diff", "--name-status", f"origin/{CONFIG['base_branch']}...HEAD")
+    files = []
+    for line in diff.splitlines():
+        status, *paths = line.split("\t")
+        new = paths[-1]  # for renames and copies, the new path
+        if not status.startswith("D") and any(fnmatch.fnmatch(new, pattern) for pattern in INTEGRATION_PATHS):
+            files.append(new)
+    return files
+
+
+def docker_info():
+    return subprocess.run(["docker", "info"], capture_output=True, text=True)
+
+
+def ensure_docker():
+    """Run `docker info`, starting dockerd first in a cloud session. Returns its last result and extra report lines."""
+    info = docker_info()
+    if info.returncode == 0 or os.environ.get("CLAUDE_CODE_REMOTE") != "true":
+        return info, []
+    # The init script fails in a cloud session because it can't raise the open-file
+    # limit, so start dockerd directly, in its own session so it outlives the gate. The lock
+    # fds aren't inheritable, so the daemon never holds the integration lock.
+    try:
+        with open(DOCKERD_LOG, "a") as out:
+            subprocess.Popen(["dockerd"], stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+    except OSError as e:
+        return info, [f"Could not start `dockerd` ({e}); its log is `{DOCKERD_LOG}`."]
+    deadline = time.monotonic() + DOCKERD_WAIT
+    while time.monotonic() < deadline:
+        time.sleep(1)
+        info = docker_info()
+        if info.returncode == 0:
+            return info, []
+    return info, [f"Started `dockerd`, but `docker info` still failed after {DOCKERD_WAIT}s; its log is `{DOCKERD_LOG}`."]
+
+
+def rate_limited(output):
+    """Whether a run's output shows Docker Hub refusing a pull. `TooManyRequests` alone may be the project's own output."""
+    return any("toomanyrequests" in line or ("429 Too Many Requests" in line and "docker.io" in line)
+               for line in output.splitlines())
+
+
+def integration_command(files):
+    """This platform's integration command with `{files}` filled in, or None when config.json has none for it."""
+    cmd = INTEGRATION_COMMAND
+    if isinstance(cmd, dict):
+        cmd = cmd.get(PLATFORM) or cmd.get("default") or []
+    if not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
+        die("config.json `integration.command` must be a list of strings, or an object of such lists keyed by "
+            "linux, macos, windows or default")
+    if not cmd:
+        return None
+    argv = []
+    for arg in cmd:
+        argv += files if arg == "{files}" else [arg]
+    return argv
+
+
+def run_integration(worktree, cmd, log, log_path, deadline, previous):
+    """Run the integration command, appending to log. Returns its exit code (None on timeout) and this run's output."""
+    log.write(f"$ {' '.join(cmd)}\n")
+    log.flush()
+    offset = log.tell()
+    proc = portable.popen_group(cmd, cwd=worktree, stdout=log, stderr=subprocess.STDOUT)
+    # The tests run in their own process group, so a gate stopped by a signal would leave them
+    # running after the kernel frees its locks; take them down first. kill -9 can't be caught.
+    for sig in previous:
+        signal.signal(sig, lambda signum, _: (portable.kill_group(proc), sys.exit(128 + signum)))
+    try:
+        code = proc.wait(timeout=max(0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        portable.kill_group(proc)
+        proc.wait()
+        code = None
+    with open(log_path, "rb") as f:
+        f.seek(offset)
+        return code, f.read().decode(errors="replace")
+
+
+def integration(worktree, job_id, log_path):
+    """Run the integration command for the branch's changed integration test files. Returns (ok, one-line result, report lines)."""
+    if not INTEGRATION_COMMAND:
+        return True, "integration tests skipped", ["Skipped: config.json has no `integration.command`."]
+    files = changed_integration_files(worktree)
+    if not files:
+        return True, "integration tests skipped", ["Skipped: no integration test files changed."]
+    cmd = integration_command(files)
+    if not cmd:
+        return False, f"integration tests failed: no command for {PLATFORM}", [
+            f"Not run: `integration.command` in factory/config.json has no `{PLATFORM}` or `default` entry, so the "
+            f"integration tests can't run on this machine. Add one."]
+    # Resolved here so a bare name finds `npm.cmd` and the like on Windows, where no shell does it.
+    program = cmd[0] if os.path.dirname(cmd[0]) else shutil.which(cmd[0])
+    if not program:
+        return False, "integration tests failed: command not found", [
+            f"Not run: `{cmd[0]}`, the first word of `integration.command` in factory/config.json, is not on PATH. "
+            "Install it, or correct the command."]
+    cmd[0] = program
+
+    lock(INTEGRATION_LOCK, f"{job_id} (pid {os.getpid()})", f"the machine-wide integration test lock {INTEGRATION_LOCK}")
+    report = ["Files: " + ", ".join(f"`{f}`" for f in files)]
+    if INTEGRATION_DOCKER:
+        docker, docker_report = ensure_docker()
+        if docker.returncode != 0:
+            reason = "Docker is not reachable (`docker info` failed), so integration tests could not run"
+            Path(log_path).write_text(docker.stdout + docker.stderr, newline="\n")
+            return False, "integration tests failed: Docker not reachable", report + [f"Failed: {reason}."] + docker_report + [f"Full log: `{log_path}`"]
+
+    start = time.monotonic()
+    deadline = start + INTEGRATION_LIMIT
+    previous = {sig: signal.getsignal(sig) for sig in portable.SIGNALS}
+    with open(log_path, "w") as log:
+        for attempt in range(1, RATE_LIMIT_ATTEMPTS + 1):
+            code, output = run_integration(worktree, cmd, log, log_path, deadline, previous)
+            limited = code not in (0, None) and rate_limited(output)
+            if not limited or attempt == RATE_LIMIT_ATTEMPTS or time.monotonic() + RATE_LIMIT_WAIT > deadline:
+                break
+            note = f"Retrying after a Docker Hub rate limit (attempt {attempt + 1} of {RATE_LIMIT_ATTEMPTS})."
+            log.write(note + "\n")
+            log.flush()
+            report.append(note)
+            # No test process runs during the wait, so a signal can stop the gate as usual.
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+            time.sleep(RATE_LIMIT_WAIT)
+    for sig, handler in previous.items():
+        signal.signal(sig, handler)
+    if code is None:
+        failure = f"timed out after the {INTEGRATION_LIMIT}s limit; killed"
+    elif limited:
+        failure = f"Docker Hub rate-limited image pulls after {attempt} attempt{'s' if attempt > 1 else ''}"
+    elif code != 0:
+        failure = f"the integration command exited {code}"
+    else:
+        failure = None
+    seconds = int(time.monotonic() - start)
+    output = Path(log_path).read_text()
+    foreign = foreign_worktrees(worktree, output)
+    tail = "\n".join(output.rstrip().splitlines()[-TAIL:])
+    if failure:
+        report.append(f"Failed: {failure}.")
+    if foreign:
+        report.append("Failed: the output named another job's worktree, so this run can't be trusted:\n"
+                      + "\n".join(foreign_lines(foreign)))
+    report += [f"Full log: `{log_path}`. Last {TAIL} lines:", f"```\n{tail}\n```"]
+    if foreign:
+        verdict = "failed: output named another job's worktree"
+    elif limited:
+        verdict = "failed: Docker Hub rate limit"
+    else:
+        verdict = "failed" if failure else "passed"
+    ok = not failure and not foreign
+    return ok, f"integration tests {verdict} in {seconds}s", report
+
+
+def gate(job_id, mode):
+    job = load_job(job_id)
+    worktree = job["worktree"]
+    if job["round"] < 1:
+        die(f"{job_id} hasn't started a build round")
+    round_dir = FACTORY / "jobs" / job_id / f"round-{job['round']}"
+    name, integration_log, commit_note = VERDICT_MODES[mode]
+    lock_worktree(worktree, mode)
+    commit = git(worktree, "rev-parse", "HEAD").strip()
+    protected = protected_changes(worktree)
+    code, log, seconds = run_checks(worktree)
+    foreign = foreign_worktrees(worktree, log)
+    if foreign:
+        it_ok, it_result, it_report = (False, "integration tests skipped",
+                                       ["Skipped: checks.sh output named another job's worktree."])
+    elif code == 0:
+        log_path = round_dir / integration_log
+        it_ok, it_result, it_report = integration(worktree, job_id, log_path)
+    else:
+        it_ok, it_result, it_report = False, "integration tests skipped", ["Skipped: checks.sh failed."]
+    verdict = "PASS" if code == 0 and not foreign and not protected and it_ok else "FAIL"
+    foreign_names = ", ".join(f".worktrees/{name}" for name, _ in foreign)
+    (round_dir / f"{name}.log").write_text(log, newline="\n")
+    tail = "\n".join(log.rstrip().splitlines()[-TAIL:])
+    summary = [
+        f"checks.sh {'passed' if code == 0 else f'failed with exit {code}'} in {seconds}s",
+        f"Protected paths: {'changed: ' + ', '.join(protected) if protected else 'none changed'}",
+        f"Foreign worktrees: {foreign_names if foreign else 'none'} named in checks.sh output",
+        f"Integration: {it_result}",
+        f"Commit {commit[:7]}{commit_note}",
+    ]
+    (round_dir / f"{name}.md").write_text(
+        f"GATE: {verdict}\nCOMMIT: {commit}\n\n"
+        "## Summary\n" + "\n".join(f"- {s}" for s in summary) + "\n\n"
+        "## Protected paths\n"
+        + ("\n".join(f"- {p}" for p in protected) if protected else "None changed.")
+        + "\n\n## Foreign worktrees\n"
+        + ("\n".join(foreign_lines(foreign)) if foreign else "None named.")
+        + f"\n\n## checks.sh\nExit {code} in {seconds}s. Last {TAIL} lines of {name}.log:\n\n```\n{tail}\n```\n"
+        + "\n## Integration tests\n" + "\n\n".join(it_report) + "\n",
+        newline="\n")
+    print(f"GATE: {verdict} ({job_id} round {job['round']}, checks.sh exit {code} in {seconds}s, {it_result}"
+          + (f", protected paths changed: {', '.join(protected)}" if protected else "")
+          + (f", checks.sh output named another job's worktree: {foreign_names}" if foreign else "") + ")")
+    sys.exit(0 if verdict == "PASS" else 1)
+
+
+def checks(job_id):
+    worktree = load_job(job_id)["worktree"]
+    lock_worktree(worktree, "--checks")
+    # One merged pipe, so the builder still sees every line as it comes and the scan sees them all.
+    proc = subprocess.Popen([bash(), str(CHECKS)], cwd=worktree, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, errors="replace")
+    output = []
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        output.append(line)
+    code = proc.wait()
+    foreign = foreign_worktrees(worktree, "".join(output))
+    if foreign:
+        print("gate: checks.sh output named another job's worktree, so this run can't be trusted. Rerun "
+              f"`factory/bin/gate {job_id} --checks`; the gate fails the branch if it happens again.\n"
+              + "\n".join(foreign_lines(foreign)), file=sys.stderr)
+        sys.exit(code or 1)
+    sys.exit(code)
+
+
+def integration_only(job_id):
+    job = load_job(job_id)
+    lock_worktree(job["worktree"], "--integration")
+    round_dir = FACTORY / "jobs" / job_id / f"round-{job['round']}"
+    round_dir.mkdir(exist_ok=True)
+    ok, result, report = integration(job["worktree"], job_id, round_dir / "builder-integration.log")
+    print("\n\n".join(report) + f"\n\n{result}")
+    sys.exit(0 if ok else 1)
+
+
+def hook():
+    event = json.load(sys.stdin)
+    if event.get("stop_hook_active"):
+        sys.exit(0)  # one nudge per stop; the gate decides
+    with open(Path(event["agent_transcript_path"]).expanduser()) as f:
+        content = json.loads(f.readline())["message"]["content"]
+    prompt = content if isinstance(content, str) else " ".join(b.get("text", "") for b in content)
+    job_id = prompt.split("Job: ", 1)[1].split(".", 1)[0]
+    worktree = load_job(job_id)["worktree"]
+    lock_worktree(worktree, "--hook")
+    code, log, _ = run_checks(worktree)
+    foreign = foreign_worktrees(worktree, log)
+    if foreign:
+        print(f"factory/checks.sh output in your worktree (exit {code}) named another job's worktree, so the "
+              "gate will reject this build:\n" + "\n".join(foreign_lines(foreign))
+              + f"\n\nRerun `factory/bin/gate {job_id} --checks` until it passes without naming another "
+              "worktree, or write STATUS: BLOCKED in build.md if it keeps happening.", file=sys.stderr)
+        sys.exit(2)
+    if code != 0:
+        tail = "\n".join(log.rstrip().splitlines()[-40:])
+        print(f"factory/checks.sh fails in your worktree (exit {code}). The gate will reject this "
+              f"build. Fix it, or write STATUS: BLOCKED in build.md if you can't.\n\n{tail}",
+              file=sys.stderr)
+        sys.exit(2)
+
+
+def main(argv):
+    if argv == ["--hook"]:
+        hook()
+    elif len(argv) == 1 and not argv[0].startswith("-"):
+        gate(argv[0], "gate")
+    elif len(argv) == 2 and argv[1] in {"--merge", "--update"}:
+        gate(argv[0], argv[1])
+    elif len(argv) == 2 and argv[1] == "--checks":
+        checks(argv[0])
+    elif len(argv) == 2 and argv[1] == "--integration":
+        integration_only(argv[0])
+    else:
+        die(__doc__.strip())
+
+
+if __name__ == "__main__":
+    portable.utf8_mode()
+    main(sys.argv[1:])

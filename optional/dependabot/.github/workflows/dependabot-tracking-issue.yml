@@ -1,0 +1,73 @@
+name: Dependabot tracking issue
+
+# Dependabot opens pull requests, and the factory only picks up issues labeled
+# `factory`, so each Dependabot PR gets one tracking issue the factory builds
+# from. The issue is found again by its `Dependabot #<n>:` title prefix, among
+# `factory` issues opened by this workflow's bot only: anyone can open an issue
+# with that title, and it must neither block nor be closed in place of the real
+# one.
+on:
+  pull_request:
+    types: [opened, closed]
+    # ADAPT: the factory's base branch (`base_branch` in factory/config.json).
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  tracking-issue:
+    name: Open or close the tracking issue
+    # The PR's author, not github.actor: a person re-running the workflow must
+    # not turn their own PR into factory work.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      TRACKING_ISSUE: >-
+        map(select(.author.login == "app/github-actions"
+          and any(.labels[]; .name == "factory")
+          and (.title | startswith($prefix))))
+        | .[0].number // empty
+    steps:
+      - name: Checkout
+        if: github.event.action == 'opened'
+        # ADAPT: pin this the way the repo's other workflows pin actions.
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Open the tracking issue
+        if: github.event.action == 'opened'
+        run: |
+          prefix="Dependabot #${PR_NUMBER}:"
+          gh pr view "$PR_NUMBER" --json number,title,url,headRefName,commits > "$RUNNER_TEMP/pr.json"
+          python3 .github/scripts/dependabot-issue-text.py < "$RUNNER_TEMP/pr.json" > "$RUNNER_TEMP/issue.txt"
+          existing=$(gh issue list --state all --limit 100 --author app/github-actions --label factory \
+            --search "\"$prefix\" in:title" --json number,title,author,labels \
+            | jq -r --arg prefix "$prefix" "$TRACKING_ISSUE")
+          if [ -n "$existing" ]; then
+            echo "Issue #$existing already tracks Dependabot PR #$PR_NUMBER."
+            exit 0
+          fi
+          tail -n +3 "$RUNNER_TEMP/issue.txt" > "$RUNNER_TEMP/body.md"
+          gh issue create --label factory --title "$(head -n 1 "$RUNNER_TEMP/issue.txt")" --body-file "$RUNNER_TEMP/body.md"
+
+      - name: Close the tracking issue
+        if: github.event.action == 'closed'
+        run: |
+          prefix="Dependabot #${PR_NUMBER}:"
+          open=$(gh issue list --state open --limit 100 --author app/github-actions --label factory \
+            --search "\"$prefix\" in:title" --json number,title,author,labels \
+            | jq -r --arg prefix "$prefix" "$TRACKING_ISSUE")
+          if [ -z "$open" ]; then
+            echo "No open issue tracks Dependabot PR #$PR_NUMBER."
+            exit 0
+          fi
+          gh issue close "$open" --comment "Dependabot PR #$PR_NUMBER was closed."

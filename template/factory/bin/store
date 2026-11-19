@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""Factory job state on a GitHub branch, and a live view of it.
+
+`factory/bin/job` calls `publish` after every save when FACTORY_STATE_BRANCH
+names a branch: the job's job.json and .md files go into one commit on that
+branch, built in a bare repository of the store's own (factory/jobs/.store.git)
+and sent with `git push`. With the variable unset nothing here runs.
+
+Usage:
+  FACTORY_STATE_BRANCH=<branch> store serve [--port N]
+      serve the dashboard on 127.0.0.1 (default port 8001) from a copy of the
+      branch that follows it live. The port opens at once and the page shows
+      "loading" until the first read. The branch is read with `git fetch` into
+      a temporary bare repository of the view's own; never writes to GitHub or
+      factory/jobs/
+"""
+
+import contextlib
+import functools
+import http.server
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import portable  # noqa: E402
+
+FACTORY = Path(__file__).resolve().parents[1]
+ENV = "FACTORY_STATE_BRANCH"
+MARKER_FILE = "FACTORY-STATE.md"
+MARKER_TEXT = """# Factory state
+
+This branch holds the software factory's job state: one folder per job with its
+`job.json` and the agents' `.md` files. `factory/bin/job` writes it on every
+save; nobody else should. It shares no history with the code branches.
+"""
+UNPUBLISHED = ".unpublished"
+STORE_REPO = ".store.git"    # under factory/jobs/: where publishes are built
+STORE_LOCK = ".store.lock"
+CALL_TIMEOUT = 10    # seconds for one git call
+FETCH_TIMEOUT = 120  # seconds for the live view's fetch
+PUBLISH_LIMIT = 20   # seconds for one publish, retries included
+ATTEMPTS = 5         # publishes that lost the race for the ref
+POLL_SECONDS = 5
+MAX_SIZE = 1 << 20
+
+JOB_ID = r"\d{3,}-[a-z0-9]+(?:-[a-z0-9]+)*"
+NAME = r"[A-Za-z0-9][A-Za-z0-9_-]*"
+ENTRY = re.compile(rf"({JOB_ID})/(?:job\.json|{NAME}\.md|round-\d+/{NAME}\.md)")
+SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+class Failed(Exception):
+    def __init__(self, msg, status=None):
+        super().__init__(msg)
+        self.status = status
+
+
+def one_line(e):
+    return " ".join(str(e).split()) or type(e).__name__
+
+
+# ---- Publishing --------------------------------------------------------------
+
+
+_failed = False
+
+
+def remote_url():
+    """Where the state branch lives: the main checkout's origin."""
+    res = subprocess.run(["git", "-C", str(FACTORY.parent), "remote", "get-url", "origin"],
+                         capture_output=True, text=True)
+    if res.returncode != 0 or not res.stdout.strip():
+        raise Failed("the checkout has no origin remote to publish to")
+    return res.stdout.strip()
+
+
+def git(args, cwd, deadline, stdin=None):
+    """One git call of a publish, inside what is left of the publish's time."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise Failed(f"gave up after {PUBLISH_LIMIT:g} s")
+    timeout = min(CALL_TIMEOUT, left)
+    try:
+        res = subprocess.run(["git", *args], cwd=cwd, input=stdin, capture_output=True, text=True,
+                             encoding="utf-8", timeout=timeout,
+                             env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"})
+    except subprocess.TimeoutExpired:
+        raise Failed(f"git {args[0]} timed out after {timeout:g} s")
+    if res.returncode != 0:
+        raise Failed(f"git {args[0]}: {(res.stderr or res.stdout).strip()}")
+    return res.stdout.strip()
+
+
+def publish(jobs, job_id, base):
+    """Put job_id and every job marked unpublished on the state branch.
+
+    Never raises: a failure marks the jobs and prints one warning, and the
+    rest of this process only marks, so a dead store can't slow a command down.
+    """
+    global _failed
+    branch = os.environ.get(ENV, "")
+    if not branch:
+        return
+    ids = [job_id]
+    if not _failed:
+        try:
+            check_branch(branch, base)
+            # One publish at a time on this machine; other machines race for the branch.
+            with open(jobs / STORE_LOCK, "w") as lock:
+                portable.lock(lock)
+                ids = sorted({job_id} | {p.parent.name for p in jobs.glob(f"*/{UNPUBLISHED}")
+                                         if (p.parent / "job.json").is_file()})
+                commit_jobs(remote_url(), branch, {i: job_files(jobs / i) for i in ids}, jobs / STORE_REPO)
+            for i in ids:
+                (jobs / i / UNPUBLISHED).unlink(missing_ok=True)
+            return
+        except Exception as e:
+            _failed = True
+            print(f"job: store: {one_line(e)}; will retry on the next save", file=sys.stderr)
+    for i in ids:
+        with contextlib.suppress(OSError):
+            (jobs / i / UNPUBLISHED).touch()
+
+
+def check_branch(branch, base):
+    """A mistyped setting must never put a commit on a code branch."""
+    if branch == base:
+        raise Failed(f"{ENV}={branch!r} is the base branch; use a branch of its own such as factory-state")
+    if branch.startswith("factory/"):
+        raise Failed(f"{ENV}={branch!r} is under factory/, where job branches live")
+    if not valid_branch(branch):
+        raise Failed(f"{ENV}={branch!r} isn't a valid branch name")
+
+
+def valid_branch(branch):
+    return subprocess.run(["git", "check-ref-format", "--branch", branch], capture_output=True).returncode == 0
+
+
+def job_files(d):
+    """job.json, top-level *.md and round-<N>/*.md of one job folder; no symlinks."""
+    paths = [d / "job.json", *d.glob("*.md"),
+             *(p for r in d.glob("round-*") if re.fullmatch(r"round-\d+", r.name)
+               and r.is_dir() and not r.is_symlink() for p in r.glob("*.md"))]
+    return {p.relative_to(d).as_posix(): p.read_text()
+            for p in sorted(paths) if p.is_file() and not p.is_symlink()}
+
+
+def write_tree(files, run):
+    """A git tree for files (path -> text), with a subtree per folder."""
+    entries, folders = [], {}
+    for path, text in files.items():
+        name, _, rest = path.partition("/")
+        if rest:
+            folders.setdefault(name, {})[rest] = text
+        else:
+            entries.append(f"100644 blob {run('hash-object', '-w', '--stdin', stdin=text)}\t{name}")
+    entries += [f"040000 tree {write_tree(sub, run)}\t{name}" for name, sub in folders.items()]
+    return run("mktree", "-z", stdin="".join(e + "\0" for e in entries))
+
+
+def commit_jobs(remote, branch, jobs, repo):
+    """One commit on the remote's branch that replaces each job's folder."""
+    mine = []
+
+    def change(run, head, entries):
+        if not mine:
+            mine.extend(f"040000 tree {write_tree(files, run)}\t{i}" for i, files in jobs.items())
+        if head is None:
+            kept = [f"100644 blob {run('hash-object', '-w', '--stdin', stdin=MARKER_TEXT)}\t{MARKER_FILE}"]
+        else:
+            kept = [e for e in entries if e.split("\t", 1)[1] not in jobs]
+        return kept + mine, f"Publish {', '.join(jobs)}"
+
+    push_commit(remote, branch, repo, change)
+
+
+def push_commit(remote, branch, repo, change):
+    """Add one commit to the remote's branch, again from the new head when another machine moved it.
+
+    `change(run, head, entries)` gets the branch's head commit and top-level
+    tree entries (None and [] while there is no branch) and returns the new
+    entries and the commit message, or None to leave the branch as it is. The
+    commit is built in `repo`, a bare repository of the store's own, and goes
+    out with a plain `git push`, so nothing touches the checkout and it works
+    wherever pushing a job branch works.
+    """
+    deadline = time.monotonic() + PUBLISH_LIMIT
+
+    def run(*args, stdin=None):
+        return git(args, repo, deadline, stdin)
+
+    if not (repo / "HEAD").is_file():
+        repo.mkdir(parents=True, exist_ok=True)
+        run("init", "-q", "--bare")
+    ref = f"refs/heads/{branch}"
+    for _ in range(ATTEMPTS):
+        head = next((line.split()[0] for line in run("ls-remote", remote, ref).splitlines()
+                     if line.split()[1:] == [ref]), None)
+        entries = []
+        if head is not None:
+            if run("for-each-ref", "--format=%(objectname)", ref) != head:
+                run("fetch", "-q", "--no-tags", remote, f"+{ref}:{ref}")
+            entries = [e for e in run("ls-tree", "-z", head).split("\0") if e]
+            if not any(e.startswith("100644 blob ") and e.endswith(f"\t{MARKER_FILE}") for e in entries):
+                raise Failed(f"branch {branch} has no {MARKER_FILE}, so it isn't a factory state branch; "
+                             f"point {ENV} at one")
+        changed = change(run, head, entries)
+        if changed is None:
+            return
+        tree = run("mktree", "-z", stdin="".join(e + "\0" for e in changed[0]))
+        commit = run("commit-tree", tree, *(["-p", head] if head else []), "-m", changed[1])
+        try:
+            run("push", "-q", remote, f"{commit}:{ref}")
+        except Failed as e:
+            # The branch moved (or appeared) since we read it; start again from the new head.
+            if "! [rejected]" not in str(e):
+                raise
+            continue
+        run("update-ref", ref, commit)
+        return
+    raise Failed(f"branch {branch} kept moving; gave up after {ATTEMPTS} attempts")
+
+
+def close_merged(jobs, base, finished, is_merged, ended):
+    """Move to `merged` the jobs on the state branch that this machine doesn't hold and whose PR is merged.
+
+    A job's own machine does this for the jobs in its factory/jobs/; this is
+    for the ones whose machine is gone or isn't running the factory, which
+    would otherwise show as unfinished for ever. `finished` is the stages that
+    are already final, `is_merged(pr)` asks GitHub, and `ended` is the time to
+    record. Only job.json changes. Returns the ids it closed; never raises.
+    """
+    branch = os.environ.get(ENV, "")
+    if not branch or _failed:
+        return []
+    asked, closed = {}, []
+
+    def change(run, head, entries):
+        del closed[:]
+        new = list(entries)
+        for n, entry in enumerate(entries):
+            meta, job_id = entry.split("\t", 1)
+            if (not meta.startswith("040000 tree ") or not re.fullmatch(JOB_ID, job_id)
+                    or (jobs / job_id / "job.json").is_file()):
+                continue
+            files = [e for e in run("ls-tree", "-z", f"{head}:{job_id}").split("\0") if e]
+            if not any(f.startswith("100644 blob ") and f.endswith("\tjob.json") for f in files):
+                continue
+            text = run("cat-file", "blob", f"{head}:{job_id}/job.json")
+            if not valid_job(text, job_id):
+                continue
+            job = json.loads(text)
+            if job.get("stage") in finished or job["pr"] is None:
+                continue
+            if job["pr"] not in asked:
+                asked[job["pr"]] = is_merged(job["pr"])
+            if not asked[job["pr"]]:
+                continue
+            job["stage"], job["ended"] = "merged", ended
+            blob = run("hash-object", "-w", "--stdin", stdin=json.dumps(job, indent=2) + "\n")
+            files = [f"100644 blob {blob}\tjob.json" if f.endswith("\tjob.json") else f for f in files]
+            new[n] = f"040000 tree {run('mktree', '-z', stdin=''.join(f + chr(0) for f in files))}\t{job_id}"
+            closed.append(job_id)
+        return (new, f"Close {', '.join(closed)}: PR merged") if closed else None
+
+    try:
+        check_branch(branch, base)
+        jobs.mkdir(parents=True, exist_ok=True)
+        with open(jobs / STORE_LOCK, "w") as lock:
+            portable.lock(lock)
+            push_commit(remote_url(), branch, jobs / STORE_REPO, change)
+        return closed
+    except Exception as e:
+        print(f"job: store: {one_line(e)}; jobs of other machines with a merged PR stay open on {branch}",
+              file=sys.stderr)
+        return []
+
+
+# ---- Live view ---------------------------------------------------------------
+
+
+def now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def write_atomic(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_bytes(data)
+    portable.replace(tmp, path)
+
+
+def valid_job(data, job_id):
+    try:
+        job = json.loads(data)
+    except ValueError:
+        return False
+    return (isinstance(job, dict) and job.get("id") == job_id
+            and type(job.get("round")) is int and 0 <= job["round"] <= 100
+            and type(job.get("issue")) is int and (job.get("pr") is None or type(job["pr"]) is int))
+
+
+class LiveView:
+    """A checked copy of the state branch under root/jobs, with root/live.json.
+
+    The branch is untrusted: anyone who can push to the repository can write it.
+    It is fetched into `repo`, a bare repository of the view's own outside root,
+    and read from there; nothing is ever checked out.
+    """
+
+    def __init__(self, root, repo, branch):
+        self.root = Path(root).resolve()
+        self.jobs = self.root / "jobs"
+        self.jobs.mkdir(exist_ok=True)
+        self.repo = Path(repo).resolve()
+        self.ref = f"refs/heads/{branch}"
+        self.branch = branch
+        self.head = None
+        self.written = {}  # path under jobs/ -> sha
+        self.last_good = None
+
+    def git(self, *args, stdin=None, timeout=CALL_TIMEOUT):
+        """One git call in the view's repository; returns stdout as bytes."""
+        try:
+            res = subprocess.run(["git", f"--git-dir={self.repo}", *args], input=stdin, capture_output=True,
+                                 timeout=timeout, env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"})
+        except subprocess.TimeoutExpired:
+            raise Failed(f"git {args[0]} timed out after {timeout:g} s")
+        if res.returncode != 0:
+            raise Failed(f"git {args[0]}: {(res.stderr or res.stdout).decode(errors='replace').strip()}")
+        return res.stdout
+
+    def loading(self):
+        status = {"ok": False, "loading": True, "branch": self.branch, "last_good": None, "error": None}
+        write_atomic(self.root / "live.json", json.dumps(status).encode())
+
+    def poll(self):
+        error = None
+        try:
+            if not (self.repo / "HEAD").is_file():
+                self.git("init", "-q", "--bare")
+            remote = remote_url()
+            head = next((line.split()[0] for line in self.git("ls-remote", remote, self.ref).decode().splitlines()
+                         if line.split()[1:] == [self.ref]), None)
+            if head is None:
+                raise Failed(f"branch {self.branch} not found")
+            if head != self.head:
+                self.git("fetch", "-q", "--no-tags", "--no-recurse-submodules", remote, f"+{self.ref}:{self.ref}",
+                         timeout=FETCH_TIMEOUT)
+                fetched = self.git("rev-parse", "--verify", "-q", f"{self.ref}^{{commit}}").decode().strip()
+                self.sync(self.listing(fetched))
+                self.head = fetched
+            self.last_good = now()
+        except Exception as e:
+            error = one_line(e)
+        status = {"ok": error is None, "loading": False, "branch": self.branch, "last_good": self.last_good,
+                  "error": error}
+        write_atomic(self.root / "live.json", json.dumps(status).encode())
+
+    def listing(self, commit):
+        """Every file of the commit: mode, type, sha, size (None for a submodule) and path."""
+        entries = []
+        for record in self.git("ls-tree", "-r", "-l", "-z", commit).split(b"\0"):
+            if not record:
+                continue
+            meta, _, path = record.partition(b"\t")
+            mode, kind, sha, size = meta.decode(errors="replace").split()
+            entries.append({"mode": mode, "type": kind, "sha": sha, "size": int(size) if size.isdigit() else None,
+                            "path": path.decode(errors="replace")})
+        return entries
+
+    def read(self, shas):
+        """The bytes of each blob, from one `git cat-file --batch`."""
+        out = self.git("cat-file", "--batch", stdin="".join(s + "\n" for s in shas).encode())
+        blobs, pos = {}, 0
+        for sha in shas:
+            end = out.find(b"\n", pos)
+            header = out[pos:end].decode(errors="replace").split() if end >= 0 else []
+            if len(header) != 3 or header[:2] != [sha, "blob"] or not header[2].isdigit():
+                raise Failed(f"blob {sha} can't be read")
+            pos = end + 1 + int(header[2])
+            blobs[sha] = out[end + 1:pos]
+            pos += 1
+        return blobs
+
+    def sync(self, entries):
+        wanted = {}
+        for e in entries:
+            path = e["path"]
+            if (e["type"] != "blob" or e["mode"] != "100644" or not ENTRY.fullmatch(path)
+                    or not SHA.fullmatch(e["sha"]) or e["size"] is None or e["size"] > MAX_SIZE
+                    or not (self.jobs / path).resolve().is_relative_to(self.jobs)):
+                continue
+            wanted[path] = (e["sha"], e["size"])
+        need = sorted({s for p, (s, _) in wanted.items() if p.endswith("/job.json") or self.written.get(p) != s})
+        blobs = self.read(need)
+        for path, (sha, size) in wanted.items():
+            if sha in blobs and (len(blobs[sha]) != size or len(blobs[sha]) > MAX_SIZE):
+                raise Failed(f"blob {sha} isn't the {size} bytes the branch lists for {path}")
+        # One bad job.json would break the whole board, so its job is left out.
+        ids = {p.split("/")[0] for p in wanted}
+        bad = {i for i in ids if f"{i}/job.json" not in wanted
+               or not valid_job(blobs[wanted[f"{i}/job.json"][0]], i)}
+        wanted = {p: s for p, (s, _) in wanted.items() if p.split("/")[0] not in bad}
+        for path in set(self.written) - set(wanted):
+            (self.jobs / path).unlink(missing_ok=True)
+            del self.written[path]
+        for path, sha in wanted.items():
+            if self.written.get(path) != sha:
+                write_atomic(self.jobs / path, blobs[sha])
+                self.written[path] = sha
+        for d in sorted((p for p in self.jobs.rglob("*") if p.is_dir()), key=lambda p: -len(p.parts)):
+            if not any(d.iterdir()):
+                d.rmdir()
+
+
+class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
+def serve(port):
+    branch = os.environ.get(ENV, "")
+    if not branch:
+        sys.exit(f"store: set {ENV} to the state branch, for example {ENV}=factory-state")
+    if not valid_branch(branch):
+        sys.exit(f"store: {ENV}={branch!r} isn't a valid branch name")
+    # The served directory and, beside it where no URL reaches, the view's repository.
+    tmp = Path(tempfile.mkdtemp(prefix="factory-live-"))
+    root = tmp / "site"
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        root.mkdir()
+        shutil.copy(FACTORY / "dashboard.html", root / "dashboard.html")
+        view = LiveView(root, tmp / "repo.git", branch)
+        try:
+            server = http.server.ThreadingHTTPServer(
+                ("127.0.0.1", port), functools.partial(QuietHandler, directory=str(root)))
+        except OSError as e:
+            sys.exit(f"store: can't serve on 127.0.0.1:{port}: {e}")
+        view.loading()
+        print(f"http://127.0.0.1:{port}/dashboard.html  (branch {branch}; Ctrl-C stops)", flush=True)
+
+        def follow():
+            while True:
+                view.poll()
+                time.sleep(POLL_SECONDS)
+
+        threading.Thread(target=follow, daemon=True).start()
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def main(argv):
+    if argv[:1] == ["serve"] and len(argv) == 1:
+        serve(8001)
+    elif argv[:2] == ["serve", "--port"] and len(argv) == 3 and argv[2].isdigit():
+        serve(int(argv[2]))
+    else:
+        sys.exit(__doc__.strip())
+
+
+if __name__ == "__main__":
+    portable.utf8_mode()
+    main(sys.argv[1:])

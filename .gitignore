@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Factory runtime state, if the factory is ever run from a copy in here
+factory/jobs/
+.worktrees/
+
+# OS and editors
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local Claude Code settings
+.claude/settings.local.json
