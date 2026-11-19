@@ -876,9 +876,62 @@ def mark_ready(number):
         gh("pr", "ready", str(number), "--repo", repo())
 
 
-PR_HEADINGS = ["Background", "The problem", "The change", "Testing", "Where to look"]
+PR_HEADINGS = ["Background", "The problem", "The change", "Testing", "Proof", "Where to look"]
+# The PR is the project's own record, so nothing in it credits the tool that wrote it.
+ATTRIBUTION = re.compile(r"co-authored-by:|generated (?:with|by)\b.*\b(?:claude|anthropic|ai)\b|\U0001F916", re.I)
+# Images and videos pr.md's `## Proof` links as `proof/<name>`. A PR description can only show a file
+# that has a URL, so they go on a branch of their own, one folder per job.
+PROOF_BRANCH = "factory-proof"
+PROOF_LINK = re.compile(r"\]\(proof/([^)\s]*)\)")
+PROOF_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:png|jpe?g|gif|webm|mp4)")
+MAX_PROOF = 10 << 20
 WHERE_ENTRY = re.compile(r"- `([^`]+):(\d+)-(\d+)` (\S.*)")
 MAX_WHERE = 8
+
+
+def publish_proof(job, names):
+    """Put the job's proof files on PROOF_BRANCH, replacing the job's folder there."""
+    d = job_dir(job["id"]) / "proof"
+
+    def change(run, head, entries):
+        # --no-filters: the bytes as they are, whatever line-ending settings the machine has.
+        blobs = [f"100644 blob {run('hash-object', '-w', '--no-filters', str(d / n))}\t{n}" for n in names]
+        tree = run("mktree", "-z", stdin="".join(b + "\0" for b in blobs))
+        if head is None:
+            marker = run("hash-object", "-w", "--stdin", stdin="# Factory proof\n\nImages and videos the "
+                         "software factory's pull request descriptions show. `factory/bin/job` writes it.\n")
+            entries = [f"100644 blob {marker}\t{store.MARKER_FILE}"]
+        kept = [e for e in entries if e.split("\t", 1)[1] != job["id"]]
+        return kept + [f"040000 tree {tree}\t{job['id']}"], f"Proof for {job['id']}"
+
+    try:
+        with open(JOBS / store.STORE_LOCK, "w") as lock:
+            portable.lock(lock)
+            store.push_commit(store.remote_url(), PROOF_BRANCH, JOBS / store.STORE_REPO, change)
+    except store.Failed as e:
+        raise Refused(f"couldn't push pr.md's proof files to the `{PROOF_BRANCH}` branch: {e}. Finish again to "
+                      "retry; if it keeps failing, describe what the files show in text instead of linking them")
+
+
+def pr_proof(job, prose):
+    """prose with its `proof/<name>` links pointing at the files on PROOF_BRANCH, once they are pushed there."""
+    names = sorted(set(PROOF_LINK.findall(prose)))
+    d = job_dir(job["id"]) / "proof"
+    # These files leave the machine, so a link can't be used to push some other file.
+    require(not names or (d.is_dir() and not d.is_symlink()), "pr.md links files in `proof/`, which must be a "
+                                                              "real folder in the job folder, not a link")
+    for n in names:
+        f = d / n
+        require(PROOF_NAME.fullmatch(n), f"pr.md links `proof/{n}`; a proof file is a png, jpg, gif, webm or mp4 "
+                                         "with a plain name (letters, digits, `.`, `_`, `-`) in the job folder's "
+                                         "`proof/`")
+        require(f.is_file() and not f.is_symlink(), f"pr.md links `proof/{n}`, which isn't a file in the job "
+                                                    "folder's `proof/`; save it there or drop the link")
+        require(f.stat().st_size <= MAX_PROOF, f"`proof/{n}` is over {MAX_PROOF >> 20} MB; crop or shorten it")
+    if names:
+        publish_proof(job, names)
+    base = f"https://github.com/{repo()}/blob/{PROOF_BRANCH}/{job['id']}/"
+    return PROOF_LINK.sub(lambda m: f"]({base}{m.group(1)}?raw=true)", prose)
 
 
 def pr_body(job):
@@ -899,12 +952,15 @@ def pr_body(job):
     missing = [h for h in PR_HEADINGS if h not in headings]
     require(not missing, f"pr.md is missing {', '.join(f'`## {h}`' for h in missing)} ({fix})")
     extra = [h for h in headings if h not in PR_HEADINGS]
-    require(not extra, f"pr.md has {', '.join(f'`## {h}`' for h in extra)}, which isn't one of its five sections "
+    require(not extra, f"pr.md has {', '.join(f'`## {h}`' for h in extra)}, which isn't one of its six sections "
                        f"({fix})")
     require(headings == PR_HEADINGS, "pr.md's sections are out of order or repeated; they must be "
                                      + ", ".join(f"`## {h}`" for h in PR_HEADINGS) + " once each, in that order")
     for h, b in zip(headings, bodies):
         require(b, f"pr.md's `## {h}` section is empty; write it for a reader with no context")
+    credit = ATTRIBUTION.search(text)
+    require(not credit, f"pr.md has an attribution line ({credit.group(0)!r}); a PR description never says "
+                        "what tool or model wrote it, so remove it" if credit else "")
 
     where = []
     for line in bodies[-1].splitlines():
@@ -936,7 +992,7 @@ def pr_body(job):
         refs = f"{NOTES_HEADING}\n"
     else:
         refs = f"Closes #{job['issue']}\n" + (f"Replaces #{m.group(1)}\n" if m else "")
-    prose = text[:re.search(r"^## Where to look", text, re.M).start()].strip()
+    prose = pr_proof(job, text[:re.search(r"^## Where to look", text, re.M).start()].strip())
     return f"{refs}\n{prose}\n\n## Where to look\n\n| Where | What |\n| --- | --- |\n" + "\n".join(rows) + "\n"
 
 

@@ -59,10 +59,16 @@ rewrites files, such as `--fix`.
   is what the diff does, `## Testing` names tests that exist on the branch,
   and the `## Where to look` entries point at the main pieces of the change.
   A mismatch is a CHANGES finding.
-- **Commits**: short one-line messages and nothing stray committed. Trailers
-  and attribution (`Co-Authored-By` and the like) are the builder's, not
-  yours: the builder runs on a different model than you, so never compare
-  them with your own session's attribution or ask for commits to be rewritten.
+- **Proof**: `pr.md`'s `## Proof` shows the change working, with real output
+  or with images in `<job folder>/proof/` (open each one with Read). It must
+  cover what `## The change` promises and match the branch as it stands.
+  Proof that only says tests pass, that shows something else, or that a later
+  commit made stale is a CHANGES finding: say what evidence is missing.
+- **Commits**: short one-line messages and nothing stray committed. The
+  builder's commits and `pr.md` credit no tool or model (no `Co-Authored-By:`
+  trailer, no "Generated with ..." line). One in `pr.md` is a CHANGES
+  finding. One in a pushed commit is a Note, not a finding: pushed commits
+  are never rewritten.
 
 ## Write review-code.md
 

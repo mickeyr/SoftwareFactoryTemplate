@@ -120,6 +120,13 @@ command is set per platform in `factory/config.json`.
 - **State store.** With `FACTORY_STATE_BRANCH` set, each save publishes the
   job's files to a branch, so a factory running in a cloud session can be
   followed from anywhere (`factory/bin/store serve`).
+- **Proof in every PR.** The PR description must have a `## Proof` section
+  showing the change working: real command output, screenshots or a
+  recording. The script refuses a description without one, pushes the linked
+  images to a `factory-proof` branch so they show in the PR, and the code
+  reviewer and approver check the proof against the diff.
+- **No tool credit.** Commits and PR descriptions never carry a
+  `Co-Authored-By:` trailer or a "Generated with" line.
 - **Integration gate.** After `checks.sh`, the gate runs the repo's integration
   tests for the integration test files the branch changed (a command per
   platform in `factory/config.json`, no shell script),
