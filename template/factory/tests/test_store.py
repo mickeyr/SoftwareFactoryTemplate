@@ -556,7 +556,8 @@ class LiveViewTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.outer = Path(tmp.name)
+        # Resolved, as the view's own paths are: macOS and Windows hand out a temp folder under another name.
+        self.outer = Path(tmp.name).resolve()
         self.root = self.outer / "live"
         self.root.mkdir()
         self.remote = use_remote(self, self.outer)

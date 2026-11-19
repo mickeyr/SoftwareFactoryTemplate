@@ -916,8 +916,12 @@ def publish_proof(job, names):
 def pr_proof(job, prose):
     """prose with its `proof/<name>` links pointing at the files on PROOF_BRANCH, once they are pushed there."""
     names = sorted(set(PROOF_LINK.findall(prose)))
+    d = job_dir(job["id"]) / "proof"
+    # These files leave the machine, so a link can't be used to push some other file.
+    require(not names or (d.is_dir() and not d.is_symlink()), "pr.md links files in `proof/`, which must be a "
+                                                              "real folder in the job folder, not a link")
     for n in names:
-        f = job_dir(job["id"]) / "proof" / n
+        f = d / n
         require(PROOF_NAME.fullmatch(n), f"pr.md links `proof/{n}`; a proof file is a png, jpg, gif, webm or mp4 "
                                          "with a plain name (letters, digits, `.`, `_`, `-`) in the job folder's "
                                          "`proof/`")

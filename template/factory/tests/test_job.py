@@ -1295,13 +1295,18 @@ class PrBodyTest(JobFilesTest):
         prose = PROSE + "Generated with [Claude Code](https://x)\n\n"
         self.assertIn("attribution line", self.refused(pr_md("- `src/a.py:1-2` Fix.", prose=prose)))
 
+    def tmp_dir(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return Path(tmp.name)
+
     def proof(self, link, files=None):
         """pr.md whose Proof section shows `link`, with `files` already in the job folder's proof/."""
         self.proof_files = files or {}
         return pr_md("- `src/a.py:1-2` Fix.", prose=PROSE + f"![The page]({link})\n\n")
 
     def test_proof_files_are_pushed_and_linked(self):
-        remote = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        remote = self.tmp_dir()
         subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
         self.addCleanup(setattr, job.store, "remote_url", job.store.remote_url)
         job.store.remote_url = lambda: str(remote)
@@ -1317,12 +1322,25 @@ class PrBodyTest(JobFilesTest):
     def test_refuses_proof_link_without_its_file(self):
         self.assertIn("isn't a file", self.refused(self.proof("proof/page.png")))
 
+    @unittest.skipIf(os.name == "nt", "making a symlink needs a privilege there")
+    def test_refuses_proof_folder_that_is_a_link(self):
+        outside = self.tmp_dir()
+        (outside / "page.png").write_bytes(b"x")
+        j = self.make_job(stage="build")
+        (job.job_dir("001-x") / "build.md").write_text("STATUS: READY\n\n# Build\n")
+        (job.job_dir("001-x") / "pr.md").write_text(self.proof("proof/page.png"))
+        (job.job_dir("001-x") / "proof").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(job.Refused) as e:
+            job.advance(job.sync(j), "gate")
+        self.assertIn("must be a real folder", str(e.exception))
+
     def test_refuses_proof_file_of_another_kind(self):
         self.assertIn("png, jpg, gif, webm or mp4", self.refused(self.proof("proof/../job.json")))
 
     def test_refuses_when_proof_cannot_be_pushed(self):
         self.addCleanup(setattr, job.store, "remote_url", job.store.remote_url)
-        job.store.remote_url = lambda: str(Path(self.enterContext(tempfile.TemporaryDirectory())) / "missing")
+        missing = str(self.tmp_dir() / "missing")
+        job.store.remote_url = lambda: missing
         self.assertIn("couldn't push", self.refused(self.proof("proof/page.png", {"page.png": b"x"})))
 
     def test_refuses_missing_pr_md(self):
@@ -1810,6 +1828,7 @@ class UpdateTest(JobFilesTest):
                 self.assertEqual(pushes, [["git", "push", "origin", "factory/001-x"]])
                 self.assertNotIn("reset", self.git_commands())
                 self.assertEqual(self.read("job.json"), before)
+                job.unlock("001-x")
                 shutil.rmtree(job.job_dir("001-x"))
 
     def test_dependabot_job_pushes_its_branch(self):
@@ -1870,6 +1889,7 @@ class UpdateTest(JobFilesTest):
         self.assertEqual(self.changing(), [])
         self.assertEqual(self.gate_calls(), [])
         self.assertEqual(self.read("job.json"), before)
+        job.unlock("001-x")
         shutil.rmtree(job.job_dir("001-x"))
 
     def test_refuses_without_a_pull_request(self):
@@ -2495,7 +2515,7 @@ class IntakeWorktreeTest(unittest.TestCase):
 
     def assert_tree_gone(self):
         self.assertFalse(self.worktree.exists())
-        self.assertEqual(self.worktrees(), [f"worktree {self.main}"])
+        self.assertEqual(self.worktrees(), [f"worktree {self.main.as_posix()}"])
         self.assertEqual(self.out(self.main, "branch", "--list", f"factory/{self.ID}"), "")
 
     def test_create_checks_out_origin_main_detached_and_leaves_the_main_checkout_alone(self):
@@ -2503,7 +2523,7 @@ class IntakeWorktreeTest(unittest.TestCase):
         before = self.main_state()
         self.assertNotEqual(before[0], newest)
         j = self.create()
-        self.assertEqual(j["worktree"], str(self.worktree))
+        self.assertEqual(j["worktree"], self.worktree.as_posix())
         head = self.out(self.worktree, "rev-parse", "HEAD")
         self.assertEqual(head, self.out(self.main, "rev-parse", "origin/main"))
         self.assertEqual(head, newest)

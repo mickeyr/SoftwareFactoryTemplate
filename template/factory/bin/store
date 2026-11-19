@@ -91,11 +91,13 @@ def git(args, cwd, deadline, stdin=None):
         raise Failed(f"gave up after {PUBLISH_LIMIT:g} s")
     timeout = min(CALL_TIMEOUT, left)
     try:
-        res = subprocess.run(["git", *args], cwd=cwd, input=stdin, capture_output=True, text=True,
-                             encoding="utf-8", timeout=timeout,
+        # Bytes, not text: in text mode Windows writes every "\n" of a file's content as "\r\n".
+        res = subprocess.run(["git", *args], cwd=cwd, input=None if stdin is None else stdin.encode(),
+                             capture_output=True, timeout=timeout,
                              env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"})
     except subprocess.TimeoutExpired:
         raise Failed(f"git {args[0]} timed out after {timeout:g} s")
+    res.stdout, res.stderr = res.stdout.decode(errors="replace"), res.stderr.decode(errors="replace")
     if res.returncode != 0:
         raise Failed(f"git {args[0]}: {(res.stderr or res.stdout).strip()}")
     return res.stdout.strip()
@@ -429,6 +431,13 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+class Server(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer's own looks up the machine's full name, which blocks for many seconds on some Macs; nothing here uses it.
+        http.server.socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def serve(port):
     branch = os.environ.get(ENV, "")
     if not branch:
@@ -444,7 +453,7 @@ def serve(port):
         shutil.copy(FACTORY / "dashboard.html", root / "dashboard.html")
         view = LiveView(root, tmp / "repo.git", branch)
         try:
-            server = http.server.ThreadingHTTPServer(
+            server = Server(
                 ("127.0.0.1", port), functools.partial(QuietHandler, directory=str(root)))
         except OSError as e:
             sys.exit(f"store: can't serve on 127.0.0.1:{port}: {e}")

@@ -85,7 +85,9 @@ class GateTestCase(unittest.TestCase):
         self.fake_dockerd(up=True)
         self.fake_integration(PASSING)
         # The gate leaves dockerd running on purpose, so Popen warns when its object is collected.
-        self.enterContext(warnings.catch_warnings())
+        quiet = warnings.catch_warnings()
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
         warnings.simplefilter("ignore", ResourceWarning)
 
     def set_env(self, name, value):
