@@ -712,8 +712,8 @@ class LiveViewTest(unittest.TestCase):
         jobs = self.outer / "jobs"
         (jobs / "001-a" / "round-1").mkdir(parents=True)
         (jobs / "001-a" / "job.json").write_text(json.dumps(job_json("001-a")))
-        (jobs / "001-a" / "spec.md").write_text("# Spec\n")
-        (jobs / "001-a" / "round-1" / "checks.md").write_text("GATE: PASS\n")
+        (jobs / "001-a" / "spec.md").write_text("# Spec\n", newline="\n")
+        (jobs / "001-a" / "round-1" / "checks.md").write_text("GATE: PASS\n", newline="\n")
         store.publish(jobs, "001-a", "main")
         self.view.poll()
         self.assertTrue(self.status()["ok"])

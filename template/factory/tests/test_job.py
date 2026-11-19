@@ -1308,6 +1308,8 @@ class PrBodyTest(JobFilesTest):
     def test_proof_files_are_pushed_and_linked(self):
         remote = self.tmp_dir()
         subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+        os.environ.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+                           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"})
         self.addCleanup(setattr, job.store, "remote_url", job.store.remote_url)
         job.store.remote_url = lambda: str(remote)
         png = b"\x89PNG\r\n\x1a\n\x00binary\r\n"

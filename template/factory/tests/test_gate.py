@@ -79,6 +79,12 @@ class GateTestCase(unittest.TestCase):
                             ("INTEGRATION_DOCKER", os.name != "nt"), ("PLATFORM", "linux")]:
             self.addCleanup(setattr, gate, name, getattr(gate, name))
             setattr(gate, name, value)
+        # The gate keeps its locks until its process ends; this process goes on, and Windows
+        # can't delete the temp folder while a lock file in it is open.
+        real_lock, held = gate.lock, []
+        self.addCleanup(setattr, gate, "lock", real_lock)
+        gate.lock = lambda *args: held.append(real_lock(*args)) or held[-1]
+        self.addCleanup(lambda: [os.close(fd) for fd in held])
         self.set_env("PATH", f"{self.bin}{os.pathsep}{os.environ['PATH']}")
         self.set_env("CLAUDE_CODE_REMOTE", None)
         self.fake_bin("docker", DOCKER.format(fake=self.fake))
@@ -189,9 +195,10 @@ class GateIntegrationTest(GateTestCase):
         self.assertTrue(ok, result)
         self.assertEqual(self.dockerd_runs(), 1)
         self.assertEqual(self.integration_calls(), 1)
-        fds = (self.fake / "dockerd-fds").read_text()
-        self.assertIn(str(gate.DOCKERD_LOG), fds)
-        self.assertNotIn(str(gate.INTEGRATION_LOCK), fds)
+        if Path("/proc/self/fd").is_dir():  # the fake dockerd lists its open files from /proc, which macOS lacks
+            fds = (self.fake / "dockerd-fds").read_text()
+            self.assertIn(str(gate.DOCKERD_LOG), fds)
+            self.assertNotIn(str(gate.INTEGRATION_LOCK), fds)
 
     @sh_fakes
     def test_cloud_session_dockerd_never_up_names_its_log(self):
