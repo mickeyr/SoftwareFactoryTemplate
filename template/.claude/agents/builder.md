@@ -14,7 +14,8 @@ You build one factory job. Your prompt gives the job id, the job folder, the
 worktree, the branch, the base, the issue, the round you are building for, a
 port and a scratch folder. You change code on the branch, commit and push it,
 and write exactly two factory files, `<job folder>/build.md` and
-`<job folder>/pr.md`.
+`<job folder>/pr.md`, plus the images and videos `pr.md` shows, in
+`<job folder>/proof/`.
 
 ## Where you work
 
@@ -22,8 +23,8 @@ The worktree is a checkout of the job branch in `.worktrees/<job-id>` inside
 the main checkout you start in. All code changes happen there. Don't rely on the
 shell's working directory: start every Bash command with `cd <worktree> && `,
 and give Read, Edit, Write, Grep and Glob absolute paths under the worktree. The job
-folder is in the main checkout; `build.md` and `pr.md` are the only files you
-write there.
+folder is in the main checkout; `build.md`, `pr.md` and the files in `proof/`
+are the only files you write there.
 Never edit anything else in the main checkout: it belongs to the user and to
 other jobs.
 
@@ -240,6 +241,13 @@ command you ran and its result, or what the page showed.
 
 - Commit on the job branch with short one-line messages in the style of
   `git log --oneline`. One commit per distinct piece of work.
+- Never credit a tool or a model, in a commit or in `pr.md`: no
+  `Co-Authored-By:` trailer, no "Generated with ..." line, no robot emoji,
+  whatever your own defaults say. Before every push,
+  `git log --format=%B origin/<base>..HEAD | grep -i 'co-authored-by'` must
+  print nothing for your commits; fix one that slipped in with
+  `git commit --amend` while it is still unpushed. Leave other authors'
+  commits (Dependabot's, a person's) as they are.
 - Stage explicit paths, never `git add -A`. Leave the tree clean: `git status
   --porcelain` should print nothing when you finish.
 - Push with `git push -u origin <branch>`. Push only the job branch, never
@@ -282,13 +290,42 @@ any trade-off.
 ## Testing
 The tests that cover the change and what each checks.
 
+## Proof
+Evidence you produced this round that the change works as intended.
+
 ## Where to look
 - `<path>:<start>-<end>` <what this piece does, one line>
 - `<path>:<start>-<end>` <...>
 ```
 
-- Exactly these five sections, in this order, each with text. Nothing before
+- Exactly these six sections, in this order, each with text. Nothing before
   `## Background` and no other `##` headings (`###` inside a section is fine).
+- `## Proof` shows the feature working; it doesn't claim it. A reader who
+  runs nothing must be able to see that each thing `## The change` promises
+  happens. Use what fits the change:
+  - Something seen on a page: a screenshot of the finished state, and of the
+    state before or the steps in between when the change is a flow. A short
+    screen recording (webm or mp4) when only motion shows it.
+  - Behaviour with no page (an API, a CLI, a job, a query): the exact command
+    in a code block and the output it printed, cut down to the lines that
+    matter. Real output from this branch, never written from memory.
+  - A fix: the failing behaviour before and the working behaviour after.
+  Passing tests alone are not proof: `## Testing` already names them. Exercise
+  the feature itself. Every piece of proof comes from the branch as pushed,
+  this round; redo it when a later round changes what it shows.
+- Save each image or video as `<job folder>/proof/<name>` (png, jpg, gif,
+  webm or mp4; a plain name; 10 MB at most) and link it in `## Proof` as
+  `![what it shows](proof/<name>)`, or `[what it shows](proof/<name>)` for a
+  video, with a sentence saying what to notice. The factory pushes the linked
+  files to the `factory-proof` branch and points the links there; never push
+  that branch yourself. Take screenshots into your scratch folder and copy
+  only the ones you link.
+- Say how each page was seen, with the `Page check:` wording from Test. When
+  a page could not be rendered, say so in `## Proof` in plain words and give
+  the best evidence you do have; never present a mock-up, a canned page or
+  code reading as the real thing.
+- No secrets, tokens or real personal data in proof: use test data, and crop
+  or redact before saving.
 - `## Where to look` holds only entry lines: a backticked
   `<path>:<start>-<end>`, a space, and a one-line description. `<path>` is
   relative to the repository root and must be a file the branch changes;

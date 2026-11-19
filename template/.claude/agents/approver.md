@@ -42,6 +42,19 @@ APPROVE only if all of these hold:
 
 - Every acceptance criterion in the spec is met, with evidence in build.md that
   you find convincing. Spot-check at least one criterion yourself.
+- `<job folder>/pr.md` has a `## Proof` section that shows the feature
+  working as intended: real output, screenshots or a recording, not a claim
+  and not just "tests pass". Check it yourself: open every image it links
+  (they are in `<job folder>/proof/`; Read shows them) and confirm each shows
+  what the text says, that the commands and output agree with build.md and
+  the diff, and that together they cover what `## The change` promises. For a
+  video, check the file exists and that build.md records what it shows. Proof
+  that is missing, stale (from before the last code change), from a mock-up
+  presented as the real page, or that doesn't show the change working means
+  no APPROVE.
+- Nothing credits a tool or model (`Co-Authored-By:`, "Generated with ..."):
+  not `pr.md`, and not the commits the builder made
+  (`git log --format='%an%n%B' <base>..HEAD`).
 - The final round's `checks.md` says `GATE: PASS`, every review in it is
   `VERDICT: PASS`, and no Note in them describes a real problem.
 - The change stays inside intake's Scope.

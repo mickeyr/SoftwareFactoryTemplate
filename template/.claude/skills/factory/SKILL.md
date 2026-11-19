@@ -28,7 +28,7 @@ worktree           → made detached at a fresh origin/<base> by job create (and
                      (or Dependabot's branch)
 spec-writer (opus) → spec.md
 builder (opus)     → commits, writes pr.md; the first push opens a draft PR "Closes #<n>"
-advance → gate     → checks pr.md and writes the PR body from it, every round
+advance → gate     → checks pr.md (its `## Proof` included) and writes the PR body from it, every round
 gate (script)      → checks.sh, then integration tests for changed integration test files; FAIL → builder gets the logs, no reviewers spawned
 reviewers (routed) → parallel, WAIT FOR ALL; CHANGES → builder → gate → reviewers
 approver (opus)    → APPROVE: sync origin/<base>, gate, factory/bin/job merge
@@ -73,6 +73,7 @@ through the scripts. `factory/jobs/` is gitignored runtime state.
 <repo>/factory/jobs/<job-id>/spec.md
 <repo>/factory/jobs/<job-id>/build.md
 <repo>/factory/jobs/<job-id>/pr.md             the PR description; `advance <id> gate` writes it to the PR body
+<repo>/factory/jobs/<job-id>/proof/            images and videos pr.md's `## Proof` links; `advance <id> gate` pushes them to the `factory-proof` branch
 <repo>/factory/jobs/<job-id>/round-<N>/checks.md        the gate's verdict for round N
 <repo>/factory/jobs/<job-id>/round-<N>/integration.log  the gate's integration test output
 <repo>/factory/jobs/<job-id>/round-<N>/update-checks.md the gate's verdict for the last `job update` in round N

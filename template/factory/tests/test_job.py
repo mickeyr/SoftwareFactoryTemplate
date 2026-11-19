@@ -1187,7 +1187,8 @@ PR_URL = "https://github.com/o/r/pull/7"
 PROSE = ("## Background\nThe gateway forwards calls.\n\n"
          "## The problem\nA bad header | breaks it.\n\n"
          "## The change\n- Reject the header.\n\n"
-         "## Testing\n`HeaderTests` covers it.\n\n")
+         "## Testing\n`HeaderTests` covers it.\n\n"
+         "## Proof\n`curl -H 'X: bad' /call` answered 400.\n\n")
 DIFF = "M\tsrc/a.py\nA\tsrc/b c.py\nD\tsrc/gone.py\nR100\tsrc/old.py\tsrc/new.py\n"
 
 
@@ -1221,6 +1222,9 @@ class PrBodyTest(JobFilesTest):
         (job.job_dir(j["id"]) / "build.md").write_text("STATUS: READY\n\n# Build\n")
         if text is not None:
             (job.job_dir(j["id"]) / "pr.md").write_text(text)
+        (job.job_dir(j["id"]) / "proof").mkdir()
+        for name, data in getattr(self, "proof_files", {}).items():
+            (job.job_dir(j["id"]) / "proof" / name).write_bytes(data)
         job.save(job.advance(job.sync(j), "gate"))
         return json.loads(self.read("job.json"))
 
@@ -1279,6 +1283,48 @@ class PrBodyTest(JobFilesTest):
         self.assertEqual(self.gh.keys(), [self.PATCH])
         self.assertIn(f"({anchor('src/a.py')}R1-R2)", self.body())
 
+    def test_refuses_missing_proof_section(self):
+        msg = self.refused(pr_md("- `src/a.py:1-2` Fix.", prose=PROSE[:PROSE.index("## Proof")]))
+        self.assertIn("missing `## Proof`", msg)
+
+    def test_refuses_co_author_line(self):
+        prose = PROSE + "Co-Authored-By: Claude <noreply@anthropic.com>\n\n"
+        self.assertIn("attribution line", self.refused(pr_md("- `src/a.py:1-2` Fix.", prose=prose)))
+
+    def test_refuses_generated_with_line(self):
+        prose = PROSE + "Generated with [Claude Code](https://x)\n\n"
+        self.assertIn("attribution line", self.refused(pr_md("- `src/a.py:1-2` Fix.", prose=prose)))
+
+    def proof(self, link, files=None):
+        """pr.md whose Proof section shows `link`, with `files` already in the job folder's proof/."""
+        self.proof_files = files or {}
+        return pr_md("- `src/a.py:1-2` Fix.", prose=PROSE + f"![The page]({link})\n\n")
+
+    def test_proof_files_are_pushed_and_linked(self):
+        remote = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+        self.addCleanup(setattr, job.store, "remote_url", job.store.remote_url)
+        job.store.remote_url = lambda: str(remote)
+        png = b"\x89PNG\r\n\x1a\n\x00binary\r\n"
+        self.gate(self.proof("proof/page.png", {"page.png": png, "unlinked.png": b"x"}))
+        self.assertIn("![The page](https://github.com/o/r/blob/factory-proof/001-x/page.png?raw=true)", self.body())
+        tree = subprocess.run(["git", f"--git-dir={remote}", "ls-tree", "-r", "factory-proof"],
+                              capture_output=True, text=True, check=True).stdout.splitlines()
+        blob = hashlib.sha1(b"blob %d\0" % len(png) + png).hexdigest()
+        self.assertEqual([t.split("\t")[1] for t in tree], ["001-x/page.png", "FACTORY-STATE.md"])
+        self.assertEqual(tree[0], f"100644 blob {blob}\t001-x/page.png")
+
+    def test_refuses_proof_link_without_its_file(self):
+        self.assertIn("isn't a file", self.refused(self.proof("proof/page.png")))
+
+    def test_refuses_proof_file_of_another_kind(self):
+        self.assertIn("png, jpg, gif, webm or mp4", self.refused(self.proof("proof/../job.json")))
+
+    def test_refuses_when_proof_cannot_be_pushed(self):
+        self.addCleanup(setattr, job.store, "remote_url", job.store.remote_url)
+        job.store.remote_url = lambda: str(Path(self.enterContext(tempfile.TemporaryDirectory())) / "missing")
+        self.assertIn("couldn't push", self.refused(self.proof("proof/page.png", {"page.png": b"x"})))
+
     def test_refuses_missing_pr_md(self):
         self.assertIn("pr.md doesn't exist", self.refused(None))
 
@@ -1287,7 +1333,7 @@ class PrBodyTest(JobFilesTest):
         self.assertIn("missing `## Testing`", msg)
 
     def test_refuses_headings_out_of_order(self):
-        prose = ("## The problem\nA.\n\n## Background\nB.\n\n## The change\nC.\n\n## Testing\nD.\n\n")
+        prose = ("## The problem\nA.\n\n## Background\nB.\n\n## The change\nC.\n\n## Testing\nD.\n\n## Proof\nE.\n\n")
         self.assertIn("out of order", self.refused(pr_md("- `src/a.py:1-2` Fix.", prose=prose)))
 
     def test_refuses_empty_section(self):
