@@ -109,7 +109,7 @@ class CallTest(GiteaTest):
             {"number": 2, "state": "closed", "pull_request": None}]
         issues = self.call(f"{REPO}/issues?creator=op&labels=factory&state=all&per_page=100&page=1")
         self.assertEqual(issues, [{"number": 1, "state": "open", "state_reason": None},
-                                  {"number": 2, "state": "closed", "state_reason": "completed"}])
+                                  {"number": 2, "state": "closed", "state_reason": None}])
         self.assertEqual(self.calls(), [("GET", f"{REPO}/issues", {
             "state": "all", "type": "issues", "labels": "factory", "created_by": "op", "limit": "50", "page": "1"}, None)])
 
@@ -174,7 +174,7 @@ class CallTest(GiteaTest):
         self.answer(**{f"PATCH_{REPO}/issues/5": {"number": 5, "state": "closed"}})
         closed = self.call(f"{REPO}/issues/5", "-X", "PATCH", "-f", "state=closed", "-f", "state_reason=completed")
         self.assertEqual(self.calls()[-1][3], {"state": "closed"})
-        self.assertEqual(closed["state_reason"], "completed")
+        self.assertIsNone(closed["state_reason"])
 
     def test_checks_are_the_commit_statuses(self):
         self.answer(**{f"GET_{REPO}/commits/abc/status": {"state": "pending", "statuses": [
@@ -254,6 +254,49 @@ class JobOnGiteaTest(GiteaTest):
                        f"PATCH_{REPO}/pulls/4": {"number": 4, "state": "open"}})
         job.mark_ready(4)
         self.assertEqual(self.calls()[-1], ("PATCH", f"{REPO}/pulls/4", {}, {"title": "Add x"}))
+
+    def closed(self, n, *labels):
+        return {"number": n, "state": "closed", "state_reason": None, "html_url": f"{self.url}/o/r/issues/{n}",
+                "labels": [{"name": name} for name in labels]}
+
+    def answer_labels(self, issue):
+        self.answer(**{f"POST_{REPO}/issues/{issue}/labels": []})
+
+    def test_a_dependency_closed_without_the_completed_label_waits_for_a_person(self):
+        self.assertEqual(job.dependency_action(9, [5], {5: self.closed(5)}),
+                         ("wait", "#5 closed without the factory:completed label; "
+                                  "a person must edit the Depends on line or close the issue"))
+        self.assertEqual(job.dependency_action(9, [5], {5: self.closed(5, "factory")})[0], "wait")
+
+    def test_a_dependency_with_the_completed_label_is_done(self):
+        self.assertEqual(job.dependency_action(9, [5], {5: self.closed(5, "factory:completed")}), ("new", ""))
+
+    def test_a_pull_request_is_no_dependency(self):
+        pr = {**self.closed(4, "factory:completed"), "html_url": f"{self.url}/o/r/pulls/4", "pull_request": {}}
+        self.assertEqual(job.dependency_action(9, [4], {4: pr})[1],
+                         "#4 is a pull request; a person must edit the Depends on line or close the issue")
+
+    def test_a_merged_job_marks_its_issue_completed(self):
+        self.answer(**{f"GET_{REPO}/pulls/4": {"number": 4, "state": "closed", "merged": True}})
+        self.answer_labels(5)
+        job.advance(self.make_job(stage="approve", pr=4, round=1, worktree=str(job.JOBS / "no-worktree")), "merged")
+        self.assertIn(("POST", f"{REPO}/issues/5/labels", {}, {"labels": ["factory:completed"]}), self.calls())
+
+    def test_a_split_closes_its_parent_as_completed(self):
+        self.addCleanup(job._issue_states.clear)
+        self.answer(**{f"GET_{REPO}/issues/6": self.closed(6, "factory:completed"),
+                       f"PATCH_{REPO}/issues/5": {"number": 5, "state": "closed"}})
+        self.answer_labels(5)
+        self.assertEqual(job.split_parent(5, [6]), ("skip", "split; closed, because every slice is closed as completed"))
+        writes = [c[:2] for c in self.calls() if c[0] != "GET"]
+        self.assertEqual(writes, [("POST", f"{REPO}/issues/5/labels"), ("PATCH", f"{REPO}/issues/5")])
+
+    def test_a_split_waits_while_a_slice_was_closed_without_the_label(self):
+        self.addCleanup(job._issue_states.clear)
+        self.answer(**{f"GET_{REPO}/issues/6": self.closed(6)})
+        self.assertEqual(job.split_parent(5, [6]),
+                         ("wait", "split; #6 closed without the factory:completed label; a person must close the issue"))
+        self.assertEqual([c for c in self.calls() if c[0] != "GET"], [])
 
 
 if __name__ == "__main__":

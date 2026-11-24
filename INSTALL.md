@@ -275,10 +275,14 @@ with `FACTORY_STATE_BRANCH=factory-state factory/bin/store serve` and
 http://127.0.0.1:8001/dashboard.html.
 ```
 
-**Labels.** Create the three labels. On Gitea, create them with the same
-names, colours and descriptions on the repository's Labels page, or with
+**Labels.** Create the three labels below. On Gitea, create them with the
+same names, colours and descriptions on the repository's Labels page, or with
 `curl -fsS -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/json" -d '{"name": "<name>", "color": "#<colour>", "description": "<text>"}' <url>/api/v1/repos/<owner>/<repo>/labels`
-for each. On GitHub:
+for each, and a fourth: `factory:completed`, colour `#0E8A16`, "Closed as
+completed: what depends on it may start". Gitea records no reason when an
+issue is closed, so the factory adds this label when an issue's PR merges, and
+counts a closed issue as done only when it has it; a person adds it by hand to
+an issue they closed as done. On GitHub:
 
 ```bash
 gh label create factory --color 5319E7 --description "Build this with the software factory"

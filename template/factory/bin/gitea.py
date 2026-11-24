@@ -91,10 +91,10 @@ def as_github(data):
     for item in data if isinstance(data, list) else [data]:
         if isinstance(item, dict) and item.get("pull_request", "") is None:
             del item["pull_request"]
-        # An issue here is closed with no reason given, and job holds what depends on an issue
-        # until that issue is closed as completed.
+        # Gitea records no reason for closing an issue, and calling every close "completed" would
+        # start what depends on an issue closed as not planned; job reads its completed label instead.
         if isinstance(item, dict) and "number" in item and "state" in item:
-            item.setdefault("state_reason", "completed" if item["state"] == "closed" else None)
+            item.setdefault("state_reason", None)
     return data
 
 

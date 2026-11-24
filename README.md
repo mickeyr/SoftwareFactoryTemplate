@@ -100,8 +100,10 @@ set `{"type": "gitea", "url": "https://git.example.com"}` and put an access
 token in the `GITEA_TOKEN` environment variable; nothing else is installed.
 On Gitea a draft pull request is one whose title starts with `WIP:`, checks
 are read from commit statuses, and split issues name their parent in their
-text, since Gitea has no sub-issues. The Dependabot and cloud sets need
-GitHub.
+text, since Gitea has no sub-issues. Gitea records no reason for closing an
+issue, so a closed issue counts as done only with the `factory:completed`
+label, which the factory adds when the issue's PR merges. The Dependabot and
+cloud sets need GitHub.
 
 `.github/workflows/test.yml` runs the factory's tests on all three.
 
