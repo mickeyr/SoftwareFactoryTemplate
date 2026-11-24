@@ -1,7 +1,7 @@
 # Software factory template
 
 A Claude Code software factory you install into a repository: `/factory run`
-builds every open GitHub issue labeled `factory` through
+builds every open issue labeled `factory`, on GitHub or Gitea, through
 intake → spec → build → gate → review → approve, one pull request per issue.
 
 ## How a job runs
@@ -92,6 +92,17 @@ factory needs Git for Windows: Claude Code runs its commands in Git Bash, and
 `factory/checks.sh` runs there too. Integration tests need no shell; their
 command is set per platform in `factory/config.json`.
 
+## GitHub or Gitea
+
+A repository uses one of them, set as `forge` in `factory/config.json`.
+GitHub is the default and goes through the `gh` CLI. For Gitea (or Forgejo)
+set `{"type": "gitea", "url": "https://git.example.com"}` and put an access
+token in the `GITEA_TOKEN` environment variable; nothing else is installed.
+On Gitea a draft pull request is one whose title starts with `WIP:`, checks
+are read from commit statuses, and split issues name their parent in their
+text, since Gitea has no sub-issues. The Dependabot and cloud sets need
+GitHub.
+
 `.github/workflows/test.yml` runs the factory's tests on all three.
 
 ## Layout
@@ -100,11 +111,12 @@ command is set per platform in `factory/config.json`.
 | ------------------------------------------ | ---------------------------------------------------------------------------------- |
 | `template/.claude/skills/factory/SKILL.md` | The orchestrator: the session that runs `/factory`                                 |
 | `template/.claude/agents/`                 | intake, spec-writer, builder, four reviewers, approver                             |
-| `template/factory/bin/job`                 | The only writer of job state; every GitHub call                                    |
+| `template/factory/bin/job`                 | The only writer of job state; every GitHub or Gitea call                           |
 | `template/factory/bin/gate`                | The deterministic gate: `checks.sh`, protected paths, integration tests            |
 | `template/factory/bin/route`               | Risk and surfaces → models and reviewers                                           |
 | `template/factory/bin/store`               | Publishes job state to a branch; serves the remote dashboard                       |
 | `template/factory/bin/portable.py`         | What differs between Linux, macOS and Windows                                      |
+| `template/factory/bin/gitea.py`            | Gitea and Forgejo, answered in the shape of GitHub's API                           |
 | `template/factory/checks.sh`               | Placeholder for the repo's checks                                                  |
 | `template/factory/config.json`             | Concurrency, rounds, labels, routing, prices                                       |
 | `template/factory/tests/`                  | The factory's own tests (stdlib `unittest`)                                        |
@@ -144,7 +156,11 @@ command is set per platform in `factory/config.json`.
   between machines or sessions.
 - **Windows.** The scripts run on Linux, macOS and Windows, and the
   integration tests are a command per platform, not a shell script.
-- **Tests** for `job`, `gate`, `store` and `portable`.
+- **Gitea.** A repository's issues and pull requests can be on Gitea or
+  Forgejo instead of GitHub: set `forge` in `factory/config.json` and
+  `GITEA_TOKEN` in the environment. The Dependabot and cloud sets stay
+  GitHub only.
+- **Tests** for `job`, `gate`, `store`, `portable` and `gitea`.
 
 ## Working on the template
 

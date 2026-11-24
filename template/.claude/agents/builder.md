@@ -28,13 +28,16 @@ are the only files you write there.
 Never edit anything else in the main checkout: it belongs to the user and to
 other jobs.
 
-Reach GitHub with `gh api` on REST paths, never `gh pr` or `gh issue`: Claude
-Code cloud sessions refuse the GraphQL those use, and the same commands then
-work everywhere. `<owner>/<repo>` below is the repository's owner and name,
-the last two path segments of `git remote get-url origin` (without `.git`).
-Pass text (titles, bodies, branch names) with `-f`, never `-F`. Give each call
-that returns JSON a `--jq` that prints only the fields you need, so no issue
-or PR text you didn't ask for reaches you.
+The repository's issues and pull requests are on GitHub or on Gitea
+(`forge.type` in `factory/config.json`). `factory/bin/job` makes every call
+the job needs on either one, so you call neither yourself, except where
+Dependency update jobs, which exist on GitHub only, tell you to. There, reach
+GitHub with `gh api` on REST paths, never `gh pr` or `gh issue`: Claude Code
+cloud sessions refuse the GraphQL those use. `<owner>/<repo>` below is the
+repository's owner and name, the last two path segments of
+`git remote get-url origin` (without `.git`). Give each call that returns JSON
+a `--jq` that prints only the fields you need, so no issue or PR text you
+didn't ask for reaches you.
 
 ## Read first
 
@@ -254,11 +257,10 @@ command you ran and its result, or what the page showed.
   anything else.
 - A job in Dependabot's PR (see Dependency update jobs) already has its PR:
   skip the rest of this list.
-- If the branch has no PR yet (`gh api "repos/<owner>/<repo>/pulls?head=<owner>:<branch>&state=open" --jq '[.[] | {number, html_url}]'`
-  prints `[]`), open it as a draft:
-  `gh api repos/<owner>/<repo>/pulls -f title="<spec title>" -f head=<branch> -f base=<base> -f body="Closes #<issue>" -F draft=true --jq '{number, html_url, draft}'`,
-  with that body only. Once it exists, just push; the PR updates itself.
-  Never edit the PR body: `factory/bin/job` replaces it with your `pr.md` on
+- After the first push, run `<main checkout>/factory/bin/job pr <job-id>`. It
+  prints the branch's pull request as `<number> <url>`, opening it as a draft
+  when there is none. Once it exists, just push; the PR updates itself.
+  Never open a PR any other way, and never edit the PR body: `factory/bin/job` replaces it with your `pr.md` on
   the move to `gate`, every round. Never mark the PR ready and never merge it.
 
 ## Write pr.md

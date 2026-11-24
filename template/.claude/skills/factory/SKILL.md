@@ -1,12 +1,12 @@
 ---
 name: factory
-description: Run the software factory on GitHub issues. Use when the user types /factory run, /factory run <n>, or /factory followed by anything else (a question, feedback on a job, or a new feature). The session that runs it becomes the one orchestrator for every job.
+description: Run the software factory on the repository's issues (GitHub or Gitea). Use when the user types /factory run, /factory run <n>, or /factory followed by anything else (a question, feedback on a job, or a new feature). The session that runs it becomes the one orchestrator for every job.
 ---
 
 # Factory
 
-You are the factory's only orchestrator. You work through GitHub issues labeled
-`factory`, run up to `concurrency` jobs at once, and spawn every agent for every
+You are the factory's only orchestrator. You work through issues labeled
+`factory` (on GitHub or Gitea, whichever `forge.type` in `factory/config.json` names), run up to `concurrency` jobs at once, and spawn every agent for every
 job. You never write code, specs, reviews or decisions yourself, and you never
 edit `job.json`: the scripts in `factory/bin/` change state and refuse illegal
 moves. When a script refuses, its message says why. Fix the cause or stop and
@@ -27,7 +27,7 @@ worktree           → made detached at a fresh origin/<base> by job create (and
                      intake to read; advance <id> spec turns it into factory/<job-id> from a fresh origin/<base>
                      (or Dependabot's branch)
 spec-writer (opus) → spec.md
-builder (opus)     → commits, writes pr.md; the first push opens a draft PR "Closes #<n>"
+builder (opus)     → commits, writes pr.md; after the first push `job pr` opens a draft PR "Closes #<n>"
 advance → gate     → checks pr.md (its `## Proof` included) and writes the PR body from it, every round
 gate (script)      → checks.sh, then integration tests for changed integration test files; FAIL → builder gets the logs, no reviewers spawned
 reviewers (routed) → parallel, WAIT FOR ALL; CHANGES → builder → gate → reviewers
@@ -64,6 +64,7 @@ through the scripts. `factory/jobs/` is gitignored runtime state.
                                                worktree → round-N/checks.md
 <repo>/factory/bin/route                       risk + surfaces → the job's agents
 <repo>/factory/bin/portable.py                 what differs between Linux, macOS and Windows
+<repo>/factory/bin/gitea.py                    Gitea, when `forge.type` in config.json is `gitea`: issues and PRs live there, not on GitHub
 <repo>/factory/bin/store                       publishes each save to FACTORY_STATE_BRANCH; `store serve`
                                                is the live view of that branch
 <repo>/factory/jobs/<job-id>/job.json          the job's state; the dashboard reads it
@@ -362,19 +363,21 @@ new feature, ask.
   on a failure it leaves the branch as it was and says why, and it changes no
   stage and starts no round, except as in **After a merge** below.
 - **An answer to a `needs-info` question**: post their words on the issue with
-  `gh api repos/<owner>/<repo>/issues/<n>/comments -f body="<their answer>" --jq .html_url`, then
+  `factory/bin/job answer <n>` (the answer on stdin), then
   `factory/bin/job advance <id> intake` and go to **intake**.
 - **A new feature**: create the issue, then do **/factory run <n>** with the
   new number:
 
   ```bash
-  gh api repos/<owner>/<repo>/issues -f title="<short imperative title>" -f body="<the feature, verbatim>" -f 'labels[]=factory' --jq .number
+  factory/bin/job issue "<short imperative title>" <<'EOF'
+  <the feature, verbatim>
+  EOF
   ```
 
-  `<owner>/<repo>` is the last two path segments of `git remote get-url origin`
-  (without `.git`). Use `gh api` on REST paths, not `gh issue` or `gh pr`:
-  Claude Code cloud sessions refuse the GraphQL those use. Keep the `--jq`
-  filters, so a call prints only the fields needed and no issue text.
+  It prints the new issue's number. Both commands work on GitHub and on
+  Gitea, whichever `forge.type` in `factory/config.json` names, and print
+  only what you need, so no issue text reaches you. Never call `gh` or the
+  Gitea API yourself.
 
   When the feature needs another issue merged first, a person may add a
   `Depends on #N` line to the body; the issue then holds until #N is closed
