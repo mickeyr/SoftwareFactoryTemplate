@@ -29,6 +29,8 @@ JOB = Path(__file__).resolve().parents[1] / "bin" / "job"
 _loader = importlib.machinery.SourceFileLoader("job", str(JOB))
 job = importlib.util.module_from_spec(importlib.util.spec_from_loader("job", _loader))
 _loader.exec_module(job)
+# The tests stub `gh`, so they run on GitHub whatever forge the project's config names; test_gitea covers Gitea.
+job.FORGE, job.GITEA, job.PAGE_SIZE = {"type": "github"}, False, 100
 
 URL = "https://github.com/o/r/issues/"
 NOT_FOUND = job.Refused("`gh api` failed: gh: Not Found (HTTP 404)")
@@ -1806,6 +1808,7 @@ path, jobs, argv = sys.argv[1], Path(sys.argv[2]), json.loads(sys.argv[3])
 loader = importlib.machinery.SourceFileLoader("job", path)
 job = importlib.util.module_from_spec(importlib.util.spec_from_loader("job", loader))
 loader.exec_module(job)
+job.FORGE, job.GITEA, job.PAGE_SIZE = {"type": "github"}, False, 100
 job.JOBS = jobs
 
 

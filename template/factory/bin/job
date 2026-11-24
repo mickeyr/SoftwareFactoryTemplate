@@ -422,18 +422,33 @@ def dependency_action(number, deps, states):
             never.append(f"#{d} is not a valid issue number")
         elif s is None:
             never.append(f"#{d} does not exist")
-        elif "/pull/" in s["html_url"]:
+        elif "pull_request" in s or "/pull/" in s["html_url"]:  # Gitea's pull request links end /pulls/<n>
             never.append(f"#{d} is a pull request")
         elif s["state"] == "open":
             pending.append(f"#{d}")
-        elif s["state_reason"] != "completed":
-            reason = (s["state_reason"] or "").replace("_", " ")
-            never.append(f"#{d} closed as {reason}" if reason else f"#{d} closed without a reason")
+        elif why := not_completed(d, s):
+            never.append(why)
     if never:
         return "wait", f"{', '.join(never)}; a person must edit the Depends on line or close the issue"
     if pending:
         return "hold", f"waiting for {', '.join(pending)}"
     return "new", ""
+
+
+def not_completed(number, s):
+    """Why closed issue `number` (REST JSON `s`) doesn't count as done, or "" when
+    it was closed as completed. Gitea records no reason for closing an issue, so
+    there only the completed label counts: job adds it when the issue's PR merges
+    or it closes a split's parent, and a person can add it by hand. Any other
+    close holds what depends on the issue for a person."""
+    if GITEA:
+        if LABELS["completed"] in {label["name"] for label in s.get("labels") or []}:
+            return ""
+        return f"#{number} closed without the {LABELS['completed']} label"
+    if s["state_reason"] == "completed":
+        return ""
+    reason = (s["state_reason"] or "").replace("_", " ")
+    return f"#{number} closed as {reason}" if reason else f"#{number} closed without a reason"
 
 
 _issue_states = {}
@@ -1084,6 +1099,8 @@ def advance(job, stage):
 
     if stage == "merged":
         require(job["pr"] and pr_merged(job), "the PR isn't merged")
+        if GITEA:  # what depends on the issue waits for this; see not_completed
+            label(job["issue"], add=LABELS["completed"])
         if old == "needs-human":
             label(job["issue"], remove=[LABELS["needs_human"]])
 
@@ -1335,13 +1352,14 @@ def split_parent(number, slices):
             never.append(f"#{n} does not exist")
         elif s["state"] == "open":
             pending.append(f"#{n}")
-        elif s["state_reason"] != "completed":
-            reason = (s["state_reason"] or "").replace("_", " ")
-            never.append(f"#{n} closed as {reason}" if reason else f"#{n} closed without a reason")
+        elif why := not_completed(n, s):
+            never.append(why)
     if never:
         return "wait", f"split; {', '.join(never)}; a person must close the issue"
     if pending:
         return "skip", f"split; waiting for {', '.join(pending)}"
+    if GITEA:
+        label(number, add=LABELS["completed"])
     api(f"issues/{number}", "-X", "PATCH", "-f", "state=closed", "-f", "state_reason=completed")
     return "skip", "split; closed, because every slice is closed as completed"
 
