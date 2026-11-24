@@ -67,7 +67,26 @@ everything intake left out.
 ## Assumptions
 Decisions you made where the request was ambiguous, each with a one-line reason.
 The approver escalates to a human when one of these is a product decision.
+
+## Follow-ups
+### 1. <short imperative title>
+<what exists today, what is missing, what to build>
 ```
+
+`## Follow-ups` is how work that is left out comes back. The issue closes when
+this PR merges, so work that still needs doing and is written only as prose in
+a job file is lost. List there every piece of work the issue asked for that this spec leaves out and that
+`intake.md`'s own `## Follow-ups` doesn't already list; what the author said they
+don't want stays under `## Out of scope` only.
+Each entry is `### <k>. <title>` (numbered `1.`, `2.`, ... in order, a title of
+at most 120 characters), then an optional `Needs: <j>[, <j>...]` line naming
+earlier entries of this file it builds on, then a body for a reader with no
+context: what exists today, what is missing, and what to build. Write no
+`Depends on` line and no `<!-- factory` text, and nothing in the section but
+entries. Before the PR merges, the factory files one `factory` issue per
+entry, held until this issue is closed. There is no limit on the number of
+entries. Omit the section when you have none. The factory refuses to move the
+job while the section breaks this format.
 
 ## Rules
 

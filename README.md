@@ -137,6 +137,10 @@ GitHub.
   recording. The script refuses a description without one, pushes the linked
   images to a `factory-proof` branch so they show in the PR, and the code
   reviewer and approver check the proof against the diff.
+- **No lost work.** Every step can list work it leaves out under
+  `## Follow-ups` in its own file. The script files each entry as a new
+  `factory` issue before the PR merges, held until the first issue closes.
+  There is no cap on how many, and a follow-up can have follow-ups.
 - **No tool credit.** Commits and PR descriptions never carry a
   `Co-Authored-By:` trailer or a "Generated with" line.
 - **Integration gate.** After `checks.sh`, the gate runs the repo's integration

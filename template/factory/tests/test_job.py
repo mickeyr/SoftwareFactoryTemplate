@@ -698,11 +698,8 @@ class FollowUpsTest(unittest.TestCase):
         self.assertEqual(self.parse(None), [])
         self.assertEqual(self.parse("\n  \n"), [])
 
-    def test_five_entries_pass(self):
-        self.assertEqual(len(self.parse(entries_text(5))), 5)
-
-    def test_more_than_five_refused(self):
-        self.assertIn("the limit is 5", self.refused(entries_text(6)))
+    def test_no_limit_on_the_number_of_entries(self):
+        self.assertEqual(len(self.parse(entries_text(12))), 12)
 
     def test_stray_text_refused(self):
         self.assertIn("text before the first entry", self.refused("Some notes.\n\n" + entries_text(1)))
@@ -771,7 +768,7 @@ class IntakeFollowUpsTest(JobFilesTest):
              "-f", "body=" + filed_body("Export every consumer as CSV.", 5, 1, "#5"), "-f", "labels[]=factory"],
             ["api", "repos/o/r/issues", "-X", "POST", "-f", "title=Schedule the export",
              "-f", "body=" + filed_body("Run the export nightly.", 5, 2, "#5, #41"), "-f", "labels[]=factory"]])
-        self.assertEqual(self.gh.calls[1], ["api", "repos/o/r/issues?creator=op&state=all&per_page=100&page=1"])
+        self.assertIn(["api", "repos/o/r/issues?creator=op&state=all&per_page=100&page=1"], self.gh.calls)
         keys = self.gh.keys()
         self.assertLess(max(i for i, k in enumerate(keys) if k == self.CREATE),
                         keys.index("POST repos/o/r/issues/5/comments"))
@@ -801,42 +798,26 @@ class IntakeFollowUpsTest(JobFilesTest):
 
     def test_malformed_section_refuses_before_any_call(self):
         with self.assertRaises(job.Refused) as e:
-            self.accept(follow_ups=entries_text(6))
-        self.assertIn("the limit is 5", str(e.exception))
+            self.accept(follow_ups="Some notes.\n\n" + entries_text(1))
+        self.assertIn("text before the first entry", str(e.exception))
         self.assertFalse([k for k in self.gh.keys() if k.startswith("POST")])
         self.assertFalse([c for c in self.runs if c[:3] == ["git", "worktree", "add"]])
         self.assertEqual(json.loads(self.read("job.json"))["stage"], "intake")
 
-    def test_dependabot_job_files_nothing(self):
+    def test_dependabot_job_files_its_follow_ups(self):
+        self.gh.answers[self.LIST] = [[]]
         self.accept(title="Dependabot #12: Bump x from 1 to 2")
-        self.assertNotIn(self.LIST, self.gh.keys())
-        self.assertNotIn(self.CREATE, self.gh.keys())
-        self.assertNotIn("### Follow-up issues", self.intake_comment())
+        self.assertEqual(self.gh.keys().count(self.CREATE), 2)
 
-    def test_follow_up_source_files_nothing(self):
+    def test_issue_the_factory_filed_files_its_own_follow_ups(self):
+        """Work cut from a follow-up or a slice is filed like any other, never dropped."""
         self.gh.answers["GET repos/o/r/issues/5"] = issue(
             5, author="op", body="Work.\n\nDepends on #3\n\n<!-- factory follow-up of #3, entry 1 -->")
-        self.accept()
-        self.assertNotIn(self.LIST, self.gh.keys())
-        self.assertNotIn(self.CREATE, self.gh.keys())
-        self.assertIn("### Follow-up issues\n\nThe work left out of this change is not filed as new issues, "
-                      "because the factory filed this issue itself as a follow-up of another issue. A person can "
-                      "file any of it that is worth doing.", self.intake_comment())
-
-    def test_slice_source_files_nothing(self):
-        self.gh.answers["GET repos/o/r/issues/5"] = issue(
-            5, author="op", body="Work.\n\nPart of #3.\n\n<!-- factory slice of #3, entry 2 -->")
-        self.accept()
-        self.assertNotIn(self.LIST, self.gh.keys())
-        self.assertNotIn(self.CREATE, self.gh.keys())
-        self.assertIn("because the factory filed this issue itself as one part of a larger issue",
-                      self.intake_comment())
-
-    def test_marker_from_another_author_does_not_make_a_follow_up(self):
-        self.gh.answers["GET repos/o/r/issues/5"] = issue(5, body="<!-- factory follow-up of #3, entry 1 -->")
         self.gh.answers[self.LIST] = [[]]
         self.accept()
         self.assertEqual(self.gh.keys().count(self.CREATE), 2)
+        self.assertIn("### Follow-up issues\n\n- #41 Add the export endpoint\n- #42 Schedule the export",
+                      self.intake_comment())
 
     def test_no_section_files_nothing(self):
         self.accept(follow_ups=None)
@@ -856,7 +837,6 @@ class IntakeFollowUpsTest(JobFilesTest):
         self.assertEqual(body, "<body>\n\nThis was part of the request in #5, left out of that change to keep it "
                                "small. The factory will pick it up once #5 is closed.\n\nDepends on #5\n\n"
                                "<!-- factory follow-up of #5, entry 1 -->")
-        self.assertEqual(job.factory_filed(issue(41, author="op", body=body)), "follow-up")
         self.assertEqual(job.dependencies(filed_body("Run it.", 5, 2, "#5, #41")), [5, 41])
 
 
@@ -1034,7 +1014,6 @@ class IntakeSplitTest(JobFilesTest):
         body = slice_body("<body>", 5, 1)
         self.assertEqual(body, "<body>\n\nThis is one part of #5, which was too large to build as one change.\n\n"
                                "<!-- factory slice of #5, entry 1 -->")
-        self.assertEqual(job.factory_filed(issue(41, author="op", body=body)), "slice")
         self.assertEqual(job.dependencies(slice_body("Run it.", 5, 2, "#41")), [41])
 
     def test_retry_with_every_slice_filed_and_linked_does_nothing_new(self):
@@ -1075,21 +1054,11 @@ class IntakeSplitTest(JobFilesTest):
         self.assertEqual(len(self.creates()), 2)
         self.assertEqual(saved["slices"], [41, 42])
 
-    def test_factory_filed_issue_is_never_split(self):
-        for marker, kind in [("<!-- factory slice of #3, entry 1 -->", "slice"),
-                             ("<!-- factory follow-up of #3, entry 1 -->", "follow-up")]:
-            with self.subTest(kind=kind):
-                self.gh.calls.clear()
-                self.gh.answers["GET repos/o/r/issues/5"] = issue(5, author="op", body=f"Work.\n\n{marker}")
-                why = self.refused()
-                self.assertIn(f"is a {kind} the factory filed, so it can't be split", why)
-                self.assertIn("NEEDS-INFO", why)
-                self.assertEqual(self.gh.keys(), ["GET repos/o/r/issues/5"])
-                shutil.rmtree(job.job_dir("001-x"))
-
-    def test_marker_from_another_author_does_not_block_a_split(self):
-        self.gh.answers["GET repos/o/r/issues/5"] = issue(5, body="<!-- factory slice of #3, entry 1 -->")
-        self.assertEqual(self.split()["stage"], "split")
+    def test_slice_the_factory_filed_can_be_split_again(self):
+        self.gh.answers["GET repos/o/r/issues/5"] = issue(
+            5, author="op", body="Work.\n\n<!-- factory slice of #3, entry 1 -->")
+        saved = self.split()
+        self.assertEqual((saved["stage"], saved["slices"]), ("split", [41, 42]))
 
     def test_dependabot_job_refused_before_any_call(self):
         why = self.refused(title="Dependabot #12: Bump x from 1 to 2")
@@ -1097,7 +1066,7 @@ class IntakeSplitTest(JobFilesTest):
         self.assertEqual(self.gh.calls, [])
 
     def test_bad_section_refused_before_any_call(self):
-        for slices, why in [(entries_text(1), "a split needs at least 2"), (entries_text(6), "the limit is 5"),
+        for slices, why in [(entries_text(1), "a split needs at least 2"),
                             (None, "has 0 entries"),
                             ("### 1. One\nBody.\n### 3. Three\nBody.\n", "should be `### 2. <title>`"),
                             (entries_text(1) + "### 2. Two\nBody.\nDepends on #9\n", "`Depends on` line"),
@@ -1743,6 +1712,75 @@ class MergeTest(JobFilesTest):
         code, out, err = self.conflict(round=2, branch="dependabot/npm/x-1.2.3", dependabot=True)
         self.assert_sent_to_build(code, out, err, 3)
         self.assertIn(["git", "merge", "--no-edit", "origin/main"], self.runs)
+
+    # Work a step after intake left out is filed before the merge closes the issue.
+    LIST = "GET repos/o/r/issues?creator=op&state=all&per_page=100"
+    CREATE = "POST repos/o/r/issues"
+    COMMENT = "POST repos/o/r/issues/5/comments"
+
+    def write(self, name, text):
+        path = job.job_dir("001-x") / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(text)
+
+    def creates(self):
+        return [c for c in self.gh.calls if self.gh.key(c) == self.CREATE]
+
+    def test_merge_files_what_every_later_step_left_out_before_it_merges(self):
+        self.merged_on_merge()
+        # The list of the operator's issues holds what was filed, as the real one does: the
+        # move to merged then finds every issue the move to merging filed.
+        filed, create = [], job.create_issue
+
+        def create_and_list(title, body):
+            made = create(title, body)
+            filed.append(issue(made["number"], author="op", body=body))
+            return made
+
+        replace(self, create_issue=create_and_list)
+        self.gh.answers[self.LIST] = [filed]
+        self.gh.answers[self.CREATE] = iter({"number": n} for n in (41, 42, 43, 44))
+        self.make_job(stage="approve", pr=7)
+        self.write("spec.md", "# Spec\n\n## Follow-ups\n### 1. Export as CSV\nNothing exports today.\n")
+        self.write("build.md", "DONE\n\n## Follow-ups\n### 1. Cover the retry path\nNo test covers it.\n"
+                               "\n### 2. Then remove the old path\nNeeds: 1\nIt is dead once covered.\n")
+        self.write("round-1/review-code.md", "PASS\n\n## Follow-ups\n### 1. Rename the helper\nIt misleads.\n")
+        self.write("decision.md", "APPROVE\n\n## Why\nAll met.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            job.cmd_merge(job.load("001-x"))
+        self.assertEqual(self.stage(), "merged")
+        bodies = [c[c.index("-f") + 3].removeprefix("body=") for c in self.creates()]
+        self.assertEqual([b.splitlines()[-1] for b in bodies], [
+            "<!-- factory follow-up of #5, spec entry 1 -->", "<!-- factory follow-up of #5, build entry 1 -->",
+            "<!-- factory follow-up of #5, build entry 2 -->", "<!-- factory follow-up of #5, review-code entry 1 -->"])
+        self.assertEqual(job.dependencies(bodies[2]), [5, 42])
+        keys = self.gh.keys()
+        self.assertLess(max(i for i, k in enumerate(keys) if k == self.CREATE), keys.index(self.MERGE))
+        [said] = [c[-1] for c in self.gh.calls if self.gh.key(c) == self.COMMENT]
+        self.assertIn("- #41 Export as CSV\n- #42 Cover the retry path\n- #43 Then remove the old path\n"
+                      "- #44 Rename the helper", said)
+
+    def test_pull_request_a_person_merged_files_them_once(self):
+        self.gh.answers["GET repos/o/r/pulls/7"] = {"merged": True, "draft": False}
+        filed = issue(41, author="op", body="x\n\n<!-- factory follow-up of #5, decision entry 1 -->")
+        self.gh.answers[self.LIST] = [[filed]]
+        self.gh.answers[self.CREATE] = iter([{"number": 42}])
+        j = self.make_job(stage="needs-human", pr=7)
+        self.write("decision.md", "ESCALATE\n\n## Follow-ups\n### 1. Already filed\nBody.\n"
+                                  "\n### 2. Not yet filed\nBody.\n")
+        job.save(job.advance(job.sync(j), "merged"))
+        self.assertEqual(self.stage(), "merged")
+        self.assertEqual([c[5] for c in self.creates()], ["title=Not yet filed"])
+        [said] = [c[-1] for c in self.gh.calls if self.gh.key(c) == self.COMMENT]
+        self.assertIn("- #42 Not yet filed", said)
+        self.assertNotIn("#41", said)
+
+    def test_section_that_cannot_be_filed_stops_the_move(self):
+        j = self.make_job(stage="approve", pr=7)
+        self.write("decision.md", "APPROVE\n\n## Follow-ups\nDo the rest later.\n")
+        with self.assertRaisesRegex(job.Refused, "decision.md ## Follow-ups: text before the first entry"):
+            job.advance(job.sync(j), "merging")
+        self.assertEqual(self.gh.calls, [])
 
 
 # Runs factory/bin/job's main() in a process of its own, against a throwaway jobs

@@ -144,6 +144,10 @@ VERDICT: PASS | CHANGES
 ## Notes
 
 Non-blocking observations. Optional.
+
+## Follow-ups
+### 1. <short imperative title>
+<what exists today, what is missing, what to build>
 ```
 
 - The first line must be exactly `VERDICT: PASS` or `VERDICT: CHANGES`.
@@ -164,5 +168,21 @@ Non-blocking observations. Optional.
   "Not rendered" may still be `VERDICT: PASS` when that bullet is there and the
   code review finds nothing, but it never counts as having used the page.
 - Under Findings, write "None." when there are none.
+
+`## Follow-ups` is how work that is left out comes back. The issue closes when
+this PR merges, so work that still needs doing and is written only as prose in
+a job file is lost. List there every real problem you decided not to ask for changes on: a bug that
+was already there, a gap just outside this change, work the build put off. A
+matter of taste is a Note, not a follow-up. Only the last round's review is
+read, so repeat an entry in each round while it still holds.
+Each entry is `### <k>. <title>` (numbered `1.`, `2.`, ... in order, a title of
+at most 120 characters), then an optional `Needs: <j>[, <j>...]` line naming
+earlier entries of this file it builds on, then a body for a reader with no
+context: what exists today, what is missing, and what to build. Write no
+`Depends on` line and no `<!-- factory` text, and nothing in the section but
+entries. Before the PR merges, the factory files one `factory` issue per
+entry, held until this issue is closed. There is no limit on the number of
+entries. Omit the section when you have none. The factory refuses to move the
+job while the section breaks this format.
 
 When you're done, reply with one line: the first line of review-ux.md.
