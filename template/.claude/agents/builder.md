@@ -364,6 +364,10 @@ The commands you ran and whether each one passed.
 ### Round <N>
 What you did this round. On rounds after the first, list each gate failure or
 review finding and what you did about it, or why you didn't change anything.
+
+## Follow-ups
+### 1. <short imperative title>
+<what exists today, what is missing, what to build>
 ```
 
 `## Summary` is 3 to 5 short bullets a human can skim on the dashboard. The
@@ -375,5 +379,20 @@ in the environment fails. Explain exactly what blocks you under a `## Blocked`
 heading. Don't paper over a failure to reach READY. The factory posts the
 `## Blocked` section for a person on the PR or the issue, so write it plainly
 and don't name job-folder files.
+
+`## Follow-ups` is how work that is left out comes back. The issue closes when
+this PR merges, so work that still needs doing and is written only as prose in
+a job file is lost. List there everything in the spec you did not build, every gap you know the
+change leaves, and cleanup it makes necessary. Keep an entry in each round's
+`build.md` for as long as the work is still not done.
+Each entry is `### <k>. <title>` (numbered `1.`, `2.`, ... in order, a title of
+at most 120 characters), then an optional `Needs: <j>[, <j>...]` line naming
+earlier entries of this file it builds on, then a body for a reader with no
+context: what exists today, what is missing, and what to build. Write no
+`Depends on` line and no `<!-- factory` text, and nothing in the section but
+entries. Before the PR merges, the factory files one `factory` issue per
+entry, held until this issue is closed. There is no limit on the number of
+entries. Omit the section when you have none. The factory refuses to move the
+job while the section breaks this format.
 
 When you're done, reply with one line: the first line of build.md.

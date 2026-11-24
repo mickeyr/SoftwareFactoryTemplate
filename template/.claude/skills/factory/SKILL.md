@@ -389,9 +389,14 @@ new feature, ask.
   label is the trust boundary. `job create` refuses unlabeled issues.
 - The factory itself applies the `factory` label only to the follow-up issues
   `job advance <id> spec` files from intake's `## Follow-ups` and the slices
-  `job advance <id> split` files from its `## Slices`: at most 5 per issue,
-  never from an issue the factory filed (a follow-up or a slice), and never
-  for Dependabot jobs. A follow-up is held by a `Depends on #<source>` line; a
+  `job advance <id> split` files from its `## Slices`. Their number has no
+  limit, and an issue the factory filed (a follow-up or a slice) files its
+  own in turn: work left out of a change is never dropped. The steps after
+  intake list theirs under `## Follow-ups` in `spec.md`, `build.md`, the last
+  round's reviews and `decision.md`; `job merge` files those before it merges,
+  and `job queue` files them for a PR a person merged. When `job` refuses a
+  move because of a `## Follow-ups` section, respawn the agent that wrote the
+  file it names with the refusal; don't edit the file yourself. A follow-up is held by a `Depends on #<source>` line; a
   slice never has a `Depends on` its parent, only on the sibling slices it
   `Needs`.
 - Dependabot PRs reach the queue without a person adding the label:

@@ -53,7 +53,7 @@ effect).
   that is useful on its own, and say what you left out. If it is vague but the
   code makes the sensible reading obvious, accept that reading and say so.
 - **SPLIT** when the issue is clear and worth building but too large for one
-  pull request, and a first slice would leave most of it open. List 2 to 5
+  pull request, and a first slice would leave most of it open. List 2 or more
   slices under `## Slices`, each useful on its own. The factory files one
   `factory` issue per slice as a sub-issue of this one and builds none of this
   issue itself; it closes this issue once every slice is closed as completed.
@@ -181,9 +181,12 @@ Two or three sentences on the decision, citing the code you looked at.
   or REJECT has none, or an empty one.
 - `## Follow-ups` is for ACCEPT only. On `advance <id> spec` the factory files
   one `factory` issue per entry, held by a `Depends on #<this issue>` line, so
-  each one comes back through intake after this one is done. An entry belongs
-  there only when it is work the issue asked for that you cut to keep the PR
-  small, and it is useful as its own PR. Limits the issue itself set, things
+  each one comes back through intake after this one is done. Every piece of
+  work the issue asked for that you cut to keep the PR small gets an entry:
+  work that is cut and has no entry is lost, since this issue closes when its
+  PR merges. There is no limit on the number of entries, and an issue the
+  factory filed itself (a follow-up or a slice) files follow-ups like any
+  other. Limits the issue itself set, things
   the author said they don't want, and your own "nice to have" ideas don't
   belong there; they stay as prose under `## Scope`. The section holds nothing
   but entries.
@@ -191,25 +194,23 @@ Two or three sentences on the decision, citing the code you looked at.
   of at most 120 characters), then an optional `Needs: <j>[, <j>...]` line
   right below the heading naming earlier entries it builds on, then the body.
   Write the body for a reader with no context, since the follow-up issue is
-  read on its own: what exists today, what is missing, and what to build. At
-  most 5 entries; omit the section
-  when there are none. Write no `Depends on` line in an entry (use `Needs:`)
+  read on its own: what exists today, what is missing, and what to build.
+  Omit the section when there are none. Write no `Depends on` line in an entry (use `Needs:`)
   and no `<!-- factory` text. A section that breaks these rules stops the
-  job until you rewrite it. Dependabot jobs write no Follow-ups section.
+  job until you rewrite it.
 - `## Slices` is for SPLIT only, and a SPLIT writes no `## Follow-ups`. On
   `advance <id> split` the factory files one `factory` issue per entry, links
   it as a sub-issue of this issue, and posts only a list of links here. The
-  entries follow the Follow-ups format and limits: `### <k>. <title>`, an
+  entries follow the Follow-ups format: `### <k>. <title>`, an
   optional `Needs:` line for the order between slices (the factory turns it
   into `Depends on` lines), a body, no `Depends on` line and no `<!-- factory`
-  text, 2 to 5 entries. Write each body for a reader with no context, since the
+  text, 2 or more entries. Write each body for a reader with no context, since the
   slice is read on its own: what exists today, what is missing, and what to
   build. For a SPLIT, `RISK` and `SURFACES` are your best guess; each slice
   gets its own intake.
-- Never SPLIT a Dependabot issue, or an issue the factory filed (its body ends
-  in a `<!-- factory follow-up` or `<!-- factory slice` marker); the factory
-  refuses both. When such an issue is too large, answer NEEDS-INFO so a person
-  decides.
+- Never SPLIT a Dependabot issue; the factory refuses it. When one is too
+  large, answer NEEDS-INFO so a person decides. An issue the factory filed
+  itself (a follow-up or a slice) can be split like any other.
 - You still write only `intake.md`; the factory files the issues.
 - The factory posts only `## For the author` as a comment on the issue (on
   ACCEPT, followed by the list of follow-up issues it filed), so write it for

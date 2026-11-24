@@ -14,8 +14,10 @@ Usage:
                                  holds; checks out a freshly fetched origin/<base> (detached) in
                                  the job's worktree for intake to read; prints the job id
   job advance <job> <stage>      move a job to <stage>, or refuse; `advance <job> spec` also files
-                                 the issues in intake.md's `## Follow-ups` (at most 5), and
-                                 `advance <job> split` files its `## Slices` (2 to 5) as sub-issues,
+                                 the issues in intake.md's `## Follow-ups`,
+                                 `advance <job> merging` and `merged` file the ones later steps
+                                 listed under `## Follow-ups` in their own files, and
+                                 `advance <job> split` files its `## Slices` (2 or more) as sub-issues,
                                  and `advance <job> gate` checks pr.md and writes the PR body from it
   job merge <job>                APPROVE → sync with the base branch, gate, push, wait for the
                                  PR's checks on that commit, merge the PR; a branch that conflicts
@@ -457,15 +459,13 @@ def dependency_states(number, deps):
 # ---- Follow-ups and slices: issues intake has the factory file -------------
 
 
-MAX_ENTRIES = 5
 MAX_ENTRY_TITLE = 120
 ENTRY_HEADING = re.compile(r"### (\d+)\. (.*)")
-FOLLOW_UP_MARKER = re.compile(r"<!-- factory follow-up of #\d+, entry \d+ -->")
-SLICE_MARKER = re.compile(r"<!-- factory slice of #\d+, entry \d+ -->")
 
 
-def follow_up_marker(source, k):
-    return f"<!-- factory follow-up of #{source}, entry {k} -->"
+def follow_up_marker(source, k, origin=""):
+    """`origin` is the file a later step listed the entry in (`spec`, `build`, ...); intake's has none."""
+    return f"<!-- factory follow-up of #{source}, {origin + ' ' if origin else ''}entry {k} -->"
 
 
 def slice_marker(parent, k):
@@ -473,29 +473,29 @@ def slice_marker(parent, k):
 
 
 def entries(path, heading):
-    """Entries of intake.md's `## <heading>` section (Follow-ups or Slices) as
+    """Entries of the `## <heading>` section (Follow-ups or Slices) of intake.md,
+    or of a later step's file, as
     dicts with k, title, needs and body; refuses a section that breaks the
     format intake.md's template gives. The text comes from an agent that read
     untrusted issue text, so it may add no `Depends on` line and no factory
     marker."""
     text = section(path, heading) or ""
+    name = path.name
     parsed = []
     for line in text.splitlines():
         if line.startswith("### "):
             k = len(parsed) + 1
             m = ENTRY_HEADING.fullmatch(line)
             require(m and int(m.group(1)) == k,
-                    f"intake.md ## {heading}: heading {line.strip()!r} should be `### {k}. <title>`")
+                    f"{name} ## {heading}: heading {line.strip()!r} should be `### {k}. <title>`")
             parsed.append({"k": k, "title": m.group(2).strip(), "needs": [], "lines": []})
         elif parsed:
             parsed[-1]["lines"].append(line)
         else:
-            require(not line.strip(), f"intake.md ## {heading}: text before the first entry: {line.strip()!r}; "
+            require(not line.strip(), f"{name} ## {heading}: text before the first entry: {line.strip()!r}; "
                                       "every line must belong to a `### <k>. <title>` entry")
-    require(len(parsed) <= MAX_ENTRIES,
-            f"intake.md ## {heading} has {len(parsed)} entries; the limit is {MAX_ENTRIES}")
     for e in parsed:
-        where = f"intake.md ## {heading} entry {e['k']}"
+        where = f"{name} ## {heading} entry {e['k']}"
         lines = e.pop("lines")
         while lines and not lines[0].strip():
             lines.pop(0)
@@ -524,15 +524,9 @@ def file_follow_ups(job, entries):
     """Find or file one `factory` issue per entry; returns the section to append
     to the intake comment. A retry reuses the issues the operator already filed,
     found by their marker line."""
-    if not entries or job["title"].startswith("Dependabot #"):
+    if not entries:
         return ""
     source = job["issue"]
-    kind = factory_filed(api_json(f"issues/{source}"))
-    if kind:
-        what = {"follow-up": "a follow-up of another issue", "slice": "one part of a larger issue"}[kind]
-        return ("\n\n### Follow-up issues\n\nThe work left out of this change is not filed as new issues, "
-                f"because the factory filed this issue itself as {what}. A person can file any of it that is "
-                "worth doing.")
     mine = operator_issues()
     numbers = {}
     for e in entries:
@@ -548,18 +542,41 @@ def file_follow_ups(job, entries):
     return "\n\n### Follow-up issues\n\n" + "\n".join(f"- #{numbers[e['k']]} {e['title']}" for e in entries)
 
 
-def factory_filed(issue):
-    """'follow-up' or 'slice' when the operator filed `issue` with that factory
-    marker as a whole line of its body, else None. Such an issue never fans out
-    further, so one label can't file issues without bound."""
-    if issue["user"]["login"] != operator():
-        return None
-    lines = (issue["body"] or "").splitlines()
-    if any(FOLLOW_UP_MARKER.fullmatch(line) for line in lines):
-        return "follow-up"
-    if any(SLICE_MARKER.fullmatch(line) for line in lines):
-        return "slice"
-    return None
+def late_follow_ups(job):
+    """{origin: entries} from the `## Follow-ups` sections of the files the steps
+    after intake wrote: the spec, the build notes, the last round's reviews and
+    the decision. Refuses a section that breaks the format, naming the file."""
+    d = job_dir(job["id"])
+    files = [d / "spec.md", d / "build.md", *sorted(round_dir(job).glob("review-*.md")), d / "decision.md"]
+    found = {f.stem: entries(f, "Follow-ups") for f in files if f.exists()}
+    return {origin: listed for origin, listed in found.items() if listed}
+
+
+def file_late_follow_ups(job, late):
+    """Find or file one `factory` issue per entry and say so on the job's issue.
+    Runs before the merge and again once the PR is merged (a person may merge it),
+    so a retry reuses the issues already filed, found by their marker line."""
+    if not late:
+        return
+    source = job["issue"]
+    mine = operator_issues()
+    new = []
+    for origin, listed in late.items():
+        numbers = {}
+        for e in listed:
+            marker = follow_up_marker(source, e["k"], origin)
+            found = first_marked(mine, marker)
+            if found:
+                numbers[e["k"]] = found["number"]
+                continue
+            depends = f"Depends on #{source}" + "".join(f", #{numbers[n]}" for n in e["needs"])
+            body = (f"{e['body']}\n\nThis came up while building #{source} and was left out of that change. "
+                    f"The factory will pick it up once #{source} is closed.\n\n{depends}\n\n{marker}")
+            numbers[e["k"]] = create_issue(e["title"], body)["number"]
+            new.append(f"- #{numbers[e['k']]} {e['title']}")
+    if new:
+        comment(source, "### Factory: follow-up issues\n\nWork left out of this change, filed so it isn't lost:\n\n"
+                + "\n".join(new))
 
 
 def operator_issues():
@@ -1062,6 +1079,8 @@ def advance(job, stage):
             f"{job['id']}: {old} → {stage} is not a legal transition")
     d = job_dir(job["id"])
     decision = header(d / "intake.md").get("DECISION") if (d / "intake.md").exists() else None
+    # Read on every move, so a section that can't be filed stops the step that wrote it.
+    late = late_follow_ups(job) if stage != "rejected" else {}
 
     if stage == "merged":
         require(job["pr"] and pr_merged(job), "the PR isn't merged")
@@ -1086,9 +1105,6 @@ def advance(job, stage):
                                   "(one slice is an ACCEPT)")
         require(section(d / "intake.md", "Follow-ups") is None,
                 "intake.md has a ## Follow-ups section; a split files only slices")
-        kind = factory_filed(api_json(f"issues/{job['issue']}"))
-        require(not kind, f"#{job['issue']} is a {kind} the factory filed, so it can't be split; "
-                          "intake should answer NEEDS-INFO instead")
         filed = file_slices(job, slices)
         job["slices"] = [i["number"] for i in filed]
         comment(job["issue"], "### Factory intake: SPLIT\n\n"
@@ -1241,6 +1257,10 @@ def advance(job, stage):
             comment(job["issue"], body)
         label(job["issue"], add=LABELS["needs_human"])
 
+    # Before the merge closes the issue; again at merged, for a PR a person merged.
+    if stage in {"merging", "merged"}:
+        file_late_follow_ups(job, late)
+
     if stage in TERMINAL:
         drop_worktree(job)
         run(["git", "branch", "-D", job["branch"]], check=False)
@@ -1333,7 +1353,12 @@ def cmd_queue():
     # A job is done once its PR is merged on GitHub, which also closes the issue.
     for j in jobs.values():
         if j["stage"] not in TERMINAL and j["pr"] and pr_merged(j):
-            save(advance(sync(j), "merged"))
+            try:
+                save(advance(sync(j), "merged"))
+            except Refused as e:
+                # One job that can't be closed must not hide the rest of the queue; it is
+                # tried again on the next run, so what it has left to file isn't dropped.
+                print(f"job: {j['id']}: its PR is merged, but the job can't be closed yet: {e}", file=sys.stderr)
     # The same for jobs on the state branch that another machine holds.
     for job_id in store.close_merged(JOBS, BASE, TERMINAL, lambda pr: pr_merged({"pr": pr}), now()):
         print(f"job: closed {job_id} on the state branch: its PR is merged", file=sys.stderr)

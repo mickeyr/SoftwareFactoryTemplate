@@ -280,6 +280,10 @@ Two or three sentences.
 ## For the human
 Only when you escalate: the exact decision or check you need from them, and
 where to look: repository files, the PR or the branch, never job-folder files.
+
+## Follow-ups
+### 1. <short imperative title>
+<what exists today, what is missing, what to build>
 ```
 
 `## Summary` comes right after the header: 3 to 5 short bullets a human can
@@ -293,5 +297,23 @@ missing or empty. Write it for a person with no context: no jargon or internal
 shorthand (describe a mechanism instead of naming it), never a job-folder file
 such as `checks.md` or `round-2/`, and the exact identifiers they must act on
 (setting names, files, commands) in backticks.
+
+`## Follow-ups` is how work that is left out comes back. The issue closes when
+this PR merges, so work that still needs doing and is written only as prose in
+a job file is lost. You are the last check before the issue closes. Read `spec.md`'s `## Out of
+scope`, `build.md` and every review of the last round for work named as left
+for later, unmet or put off, and check each has an entry in a `## Follow-ups`
+section of `intake.md`, `spec.md`, `build.md` or a last-round review. Add an
+entry here for each one that has none, and for anything you approve without.
+Don't repeat an entry another file already has.
+Each entry is `### <k>. <title>` (numbered `1.`, `2.`, ... in order, a title of
+at most 120 characters), then an optional `Needs: <j>[, <j>...]` line naming
+earlier entries of this file it builds on, then a body for a reader with no
+context: what exists today, what is missing, and what to build. Write no
+`Depends on` line and no `<!-- factory` text, and nothing in the section but
+entries. Before the PR merges, the factory files one `factory` issue per
+entry, held until this issue is closed. There is no limit on the number of
+entries. Omit the section when you have none. The factory refuses to move the
+job while the section breaks this format.
 
 When you're done, reply with one line: the first line of decision.md.
