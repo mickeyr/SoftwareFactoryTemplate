@@ -536,6 +536,19 @@ class QueueTest(JobFilesTest):
         self.assertEqual([c[-1][-7:] for c in self.gh.calls], ["&page=1", "&page=2"])
 
 
+    def test_merged_job_that_cannot_be_closed_does_not_stop_the_queue(self):
+        self.gh.answers["GET repos/o/r/issues?labels=factory&state=open&per_page=100"] = [[issue(1)]]
+        self.gh.answers["GET repos/o/r/pulls/7"] = {"state": "closed", "merged": True}
+        self.make_job(stage="needs-human", pr=7)
+        (job.job_dir("001-x") / "decision.md").write_text("ESCALATE\n\n## Follow-ups\nDo the rest later.\n")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            job.cmd_queue()
+        self.assertIn("new\t1\t-\t-\tIssue 1\n", out.getvalue())
+        self.assertIn("001-x: its PR is merged, but the job can't be closed yet: decision.md ## Follow-ups",
+                      err.getvalue())
+        self.assertEqual(json.loads(self.read("job.json"))["stage"], "needs-human")
+
     def test_closes_merged_jobs_of_other_machines(self):
         self.gh.answers["GET repos/o/r/issues?labels=factory&state=open&per_page=100"] = [[]]
         self.gh.answers["GET repos/o/r/pulls/7"] = {"state": "closed", "merged": True}

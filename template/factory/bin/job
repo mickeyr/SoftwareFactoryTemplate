@@ -1353,7 +1353,12 @@ def cmd_queue():
     # A job is done once its PR is merged on GitHub, which also closes the issue.
     for j in jobs.values():
         if j["stage"] not in TERMINAL and j["pr"] and pr_merged(j):
-            save(advance(sync(j), "merged"))
+            try:
+                save(advance(sync(j), "merged"))
+            except Refused as e:
+                # One job that can't be closed must not hide the rest of the queue; it is
+                # tried again on the next run, so what it has left to file isn't dropped.
+                print(f"job: {j['id']}: its PR is merged, but the job can't be closed yet: {e}", file=sys.stderr)
     # The same for jobs on the state branch that another machine holds.
     for job_id in store.close_merged(JOBS, BASE, TERMINAL, lambda pr: pr_merged({"pr": pr}), now()):
         print(f"job: closed {job_id} on the state branch: its PR is merged", file=sys.stderr)
