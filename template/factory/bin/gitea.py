@@ -143,8 +143,11 @@ def call(url, path, *args):
         # No filter by head branch, so it is applied here to every open pull request.
         found = as_github(pages(url, f"{repo}/pulls?state={params.get('state', ['open'])[0]}"))
         if "head" in params:
-            branch = params["head"][0].partition(":")[2]
-            found = [pr for pr in found if pr["head"]["ref"] == branch]
+            # Only a branch of this repository: a fork can name its branch like a job's, and
+            # job would then take the fork's pull request for its own and merge it.
+            branch, ours = params["head"][0].partition(":")[2], repo.removeprefix("repos/").lower()
+            found = [pr for pr in found if pr["head"]["ref"] == branch
+                     and ((pr["head"].get("repo") or {}).get("full_name") or "").lower() == ours]
         return json.dumps(found if page == 1 else [])
     if method == "POST" and rest == "issues":
         fields["labels"] = label_ids(url, repo, fields.get("labels", []))

@@ -123,10 +123,16 @@ class CallTest(GiteaTest):
     def test_open_pull_requests_are_filtered_by_head_branch(self):
         self.server.answers[f"GET {REPO}/pulls"] = (
             [{"number": n, "state": "open", "head": {"ref": f"other-{n}"}} for n in range(60)]
-            + [{"number": 99, "state": "open", "head": {"ref": "factory/001-x"}}])
+            + [{"number": 99, "state": "open", "head": {"ref": "factory/001-x", "repo": {"full_name": "o/r"}}}])
         found = self.call(f"{REPO}/pulls?head=o%3Afactory%2F001-x&state=open")
         self.assertEqual([pr["number"] for pr in found], [99])
         self.assertEqual([c[2]["page"] for c in self.calls()], ["1", "2"])
+
+    def test_a_fork_branch_named_like_ours_is_not_our_pull_request(self):
+        self.server.answers[f"GET {REPO}/pulls"] = [
+            {"number": 7, "state": "open", "head": {"ref": "factory/001-x", "repo": {"full_name": "stranger/r"}}},
+            {"number": 8, "state": "open", "head": {"ref": "factory/001-x", "repo": None}}]
+        self.assertEqual(self.call(f"{REPO}/pulls?head=o%3Afactory%2F001-x&state=open"), [])
 
     def test_new_issue_takes_label_ids(self):
         self.answer(**{f"GET_{REPO}/labels": [{"id": 7, "name": "factory"}, {"id": 8, "name": "bug"}],
