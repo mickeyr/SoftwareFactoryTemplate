@@ -26,6 +26,10 @@ Usage:
   job update --all               `job update` every needs-human job with a PR (run after a PR merges)
   job feedback <job>             needs-human → build, with your feedback (stdin) as feedback-<k>.md
   job reject <job>               needs-info or needs-human → rejected, with your reason (stdin) as rejection.md
+  job pr <job>                   the job's pull request as `<number> <url>`; opens it as a draft
+                                 from the job branch when the branch has none
+  job issue <title>              new `factory` issue with your text (stdin) as its body; prints its number
+  job answer <issue>             post your text (stdin) as a comment on the issue; prints the comment's link
   job agents <job> <json>        record the routed agent set (called by factory/bin/route)
   job sync <job>                 refresh reviews, gate and cost from the job's files, and the model
                                  each reviewer ran on (agents.ran_on) from its subagent transcript
@@ -50,6 +54,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gitea  # noqa: E402
 import portable  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
@@ -60,6 +65,9 @@ CONFIG = json.loads((FACTORY / "config.json").read_text())
 LABELS = CONFIG["labels"]
 BASE = CONFIG["base_branch"]
 MARKER = "<!-- factory -->"
+# Where the issues and pull requests live: {"type": "github"}, or {"type": "gitea", "url": "https://git.example.com"}.
+FORGE = CONFIG.get("forge") or {"type": "github"}
+GITEA = FORGE.get("type") == "gitea"
 
 _loader = importlib.machinery.SourceFileLoader("factory_store", str(BIN / "store"))
 store = importlib.util.module_from_spec(importlib.util.spec_from_loader("factory_store", _loader))
@@ -110,6 +118,32 @@ def gh(*args):
     return run(["gh", *args]).stdout
 
 
+def forge(path, *args):
+    """One REST call, with `gh api`'s arguments, to whichever of GitHub and Gitea the repository is on."""
+    if not GITEA:
+        return gh("api", path, *args)
+    require(FORGE.get("url"), 'factory/config.json has `forge.type` "gitea" but no `forge.url`; set it to the '
+                              "address people open in a browser, such as https://git.example.com")
+    try:
+        return gitea.call(FORGE["url"], path, *args)
+    except gitea.Error as e:
+        raise Refused(str(e))
+
+
+def web(*parts):
+    """A link into the repository's pages."""
+    host = FORGE["url"].rstrip("/") if GITEA else "https://github.com"
+    return "/".join([host, repo(), *parts])
+
+
+def file_url(branch, path, raw=False):
+    """Where people read `path` on `branch`; with raw, the file itself, as an image link needs."""
+    branch = urllib.parse.quote(branch, safe="/")
+    if GITEA:
+        return web("raw" if raw else "src", "branch", branch, path)
+    return web("blob", branch, path) + ("?raw=true" if raw else "")
+
+
 # Every GitHub call is `gh api` on a REST path, because Claude Code cloud
 # sessions refuse GraphQL, which `gh issue` and `gh pr` use. Paths name the
 # repository explicitly: how `{owner}/{repo}` resolves behind the cloud proxy
@@ -138,14 +172,14 @@ def repo():
 
 
 def api(path, *args):
-    return gh("api", f"repos/{repo()}/{path}", *args)
+    return forge(f"repos/{repo()}/{path}", *args)
 
 
 def api_json(path, *args):
     return json.loads(api(path, *args))
 
 
-PAGE_SIZE = 100
+PAGE_SIZE = gitea.MAX_PAGE if GITEA else 100
 
 
 def api_pages(path):
@@ -157,7 +191,7 @@ def api_pages(path):
     refuses that path."""
     items = []
     for number in itertools.count(1):
-        page = json.loads(gh("api", f"repos/{repo()}/{path}&page={number}"))
+        page = json.loads(forge(f"repos/{repo()}/{path}&page={number}"))
         items += page
         if len(page) < PAGE_SIZE:
             return items
@@ -174,7 +208,7 @@ def operator():
     """The GitHub user running the factory. Its comments carry MARKER."""
     global _operator
     if _operator is None:
-        _operator = gh("api", "user", "--jq", ".login").strip()
+        _operator = json.loads(forge("user"))["login"] if GITEA else gh("api", "user", "--jq", ".login").strip()
     return _operator
 
 
@@ -585,8 +619,7 @@ def full_notes(job, name):
     branch = os.environ.get(store.ENV, "")
     if not branch:
         return ""
-    url = f"https://github.com/{repo()}/blob/{urllib.parse.quote(branch, safe='/')}/{job['id']}/{name}"
-    return f"\n\nFull notes: [`{name}`]({url})"
+    return f"\n\nFull notes: [`{name}`]({file_url(branch, job['id'] + '/' + name)})"
 
 
 def label(number, add=None, remove=()):
@@ -868,9 +901,12 @@ def post_pr_notes(job, text):
 def mark_ready(number):
     """Mark a draft PR ready. GitHub's REST API has no call for it; the cloud
     session proxy adds one, and elsewhere `gh pr ready` works."""
-    if not api_json(f"pulls/{number}")["draft"]:
+    pr = api_json(f"pulls/{number}")
+    if not pr["draft"]:
         return
-    if os.environ.get("CLAUDE_CODE_REMOTE") == "true":
+    if GITEA:
+        api(f"pulls/{number}", "-X", "PATCH", "-f", f"title={gitea.ready_title(pr['title'])}")
+    elif os.environ.get("CLAUDE_CODE_REMOTE") == "true":
         api(f"pulls/{number}/ccr/ready_for_review", "-X", "POST")
     else:
         gh("pr", "ready", str(number), "--repo", repo())
@@ -930,8 +966,7 @@ def pr_proof(job, prose):
         require(f.stat().st_size <= MAX_PROOF, f"`proof/{n}` is over {MAX_PROOF >> 20} MB; crop or shorten it")
     if names:
         publish_proof(job, names)
-    base = f"https://github.com/{repo()}/blob/{PROOF_BRANCH}/{job['id']}/"
-    return PROOF_LINK.sub(lambda m: f"]({base}{m.group(1)}?raw=true)", prose)
+    return PROOF_LINK.sub(lambda m: f"]({file_url(PROOF_BRANCH, job['id'] + '/' + m.group(1), raw=True)})", prose)
 
 
 def pr_body(job):
@@ -982,9 +1017,12 @@ def pr_body(job):
 
     rows = []
     for p, start, end, what in where:
-        link = f"{job['pr_url']}/files#diff-{hashlib.sha256(p.encode()).hexdigest()}"
-        if not changed[p].startswith("D"):
-            link += f"R{start}-R{end}"
+        if GITEA:  # its Files tab names a file by another hash, and has no anchor for a range of lines
+            link = f"{job['pr_url']}/files#diff-{hashlib.sha1(p.encode()).hexdigest()}"
+        else:
+            link = f"{job['pr_url']}/files#diff-{hashlib.sha256(p.encode()).hexdigest()}"
+            if not changed[p].startswith("D"):
+                link += f"R{start}-R{end}"
         what = what.replace("|", "\\|")
         rows.append(f"| [`{p}:{start}-{end}`]({link}) | {what} |")
     m = re.match(r"Dependabot #(\d+)", job["title"])
@@ -1709,6 +1747,17 @@ def cmd_summary(args):
     print(f"total ${sum(j['cost_usd'] for j in jobs):.2f} (API-equivalent, factory agents only)")
 
 
+def cmd_pr(job):
+    if not job["pr"]:
+        prs = open_prs(job["branch"]) or [api_json(
+            "pulls", "-X", "POST", "-f", f"title={job['title']}", "-f", f"head={job['branch']}", "-f", f"base={BASE}",
+            "-f", f"body=Closes #{job['issue']}", "-F", "draft=true")]
+        require(len(prs) == 1, f"expected one open PR from {job['branch']}, found {len(prs)}")
+        job["pr"], job["pr_url"] = prs[0]["number"], prs[0]["html_url"]
+        save(job)
+    print(f"{job['pr']} {job['pr_url']}")
+
+
 def main(argv):
     if not argv or argv[0] in {"-h", "--help"}:
         print(__doc__.strip())
@@ -1733,6 +1782,14 @@ def main(argv):
             cmd_feedback(resolve(args[0]), sys.stdin.read())
         elif cmd == "reject" and len(args) == 1:
             cmd_reject(resolve(args[0]), sys.stdin.read())
+        elif cmd == "pr" and len(args) == 1:
+            cmd_pr(resolve(args[0]))
+        elif cmd == "issue" and len(args) == 1:
+            print(create_issue(args[0], sys.stdin.read())["number"])
+        elif cmd == "answer" and len(args) == 1 and args[0].isdigit():
+            body = sys.stdin.read()
+            require(body.strip(), "the answer on stdin is empty")
+            print(api_json(f"issues/{args[0]}/comments", "-X", "POST", "-f", f"body={body}")["html_url"])
         elif cmd == "agents" and len(args) == 2:
             cmd_agents(sync(resolve(args[0])), args[1])
         elif cmd == "sync" and len(args) == 1:

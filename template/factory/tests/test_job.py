@@ -1200,6 +1200,37 @@ def anchor(path):
     return f"{PR_URL}/files#diff-{hashlib.sha256(path.encode()).hexdigest()}"
 
 
+class OrchestratorCallsTest(JobFilesTest):
+    """The commands the orchestrator and the builder use in place of calling the forge themselves."""
+
+    def main(self, argv, stdin=""):
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(stdin)), contextlib.redirect_stdout(out):
+            job.main(argv)
+        return out.getvalue()
+
+    def test_issue_files_a_queue_issue_and_prints_its_number(self):
+        self.gh.answers["POST repos/o/r/issues"] = {"number": 12, "body": "secret text"}
+        self.assertEqual(self.main(["issue", "Add dark mode"], "The feature.\n"), "12\n")
+        self.assertEqual(self.gh.calls, [["api", "repos/o/r/issues", "-X", "POST", "-f", "title=Add dark mode",
+                                          "-f", "body=The feature.\n", "-f", "labels[]=factory"]])
+
+    def test_answer_posts_the_text_as_it_is(self):
+        self.gh.answers["POST repos/o/r/issues/5/comments"] = {"html_url": "https://x/5#c1", "body": "Yes."}
+        self.assertEqual(self.main(["answer", "5"], "Yes."), "https://x/5#c1\n")
+        self.assertEqual(self.gh.calls[0][-1], "body=Yes.")
+
+    def test_pr_reports_the_open_one_without_opening_another(self):
+        self.gh.answers["GET repos/o/r/pulls?head=o%3Afactory%2F001-x&state=open"] = [
+            {"number": 7, "html_url": PR_URL}]
+        self.make_job(stage="build")
+        job.unlock("001-x")
+        self.addCleanup(job.unlock, "001-x")  # `pr` keeps the job's lock, as every command does until its process ends
+        self.assertEqual(self.main(["pr", "001-x"]), f"7 {PR_URL}\n")
+        self.assertNotIn("POST repos/o/r/pulls", self.gh.keys())
+        self.assertEqual(json.loads(self.read("job.json"))["pr"], 7)
+
+
 class PrBodyTest(JobFilesTest):
     """The build → gate move: pr.md is checked, then rendered into the PR body."""
 

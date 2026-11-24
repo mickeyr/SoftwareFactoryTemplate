@@ -14,10 +14,19 @@ the template into the project.
 
 Stop and tell the user if any of these fail:
 
-- It's a git repo with an `origin` on GitHub, and `gh auth status` shows a user
-  who can push to it and manage its labels.
-- Its default branch (`gh api repos/<owner>/<repo> --jq .default_branch`)
-  exists on `origin`.
+- It's a git repo whose `origin` is on GitHub or on a Gitea (Forgejo works the
+  same way). The factory works with one of them per repository: ask the user
+  which when the remote's address doesn't settle it.
+  - **GitHub**: `gh auth status` shows a user who can push to it and manage
+    its labels.
+  - **Gitea**: the environment variable `GITEA_TOKEN` holds an access token of
+    a user who can push to it, with read and write on issues and on the
+    repository and read on the user. The user creates it in Gitea under
+    Settings → Applications and sets it in the shell that starts Claude Code;
+    never write it into a file in the repository. Check it with
+    `curl -fsS -H "Authorization: token $GITEA_TOKEN" <url>/api/v1/user`,
+    where `<url>` is the address people open in a browser.
+- Its default branch exists on `origin` (`git ls-remote --symref origin HEAD`).
 - `claude --version` is 2.1.257 or later (the intake agent runs on Fable).
 - `python3 --version` is 3.10 or later. The scripts use only the standard
   library.
@@ -34,6 +43,8 @@ Ask the user about the two optional sets if they haven't said:
 - **cloud**: they want to run the factory in Claude Code cloud sessions.
 - **dependabot**: the repo uses Dependabot and they want its PRs built by the
   factory.
+
+Both sets need GitHub. On Gitea, skip them without asking.
 
 Copy each file below to the same path under the project root, unchanged,
 creating folders as needed. The source path is the set's folder plus the
@@ -62,10 +73,12 @@ factory/bin/gate
 factory/bin/route
 factory/bin/store
 factory/bin/portable.py
+factory/bin/gitea.py
 factory/tests/test_job.py
 factory/tests/test_gate.py
 factory/tests/test_store.py
 factory/tests/test_portable.py
+factory/tests/test_gitea.py
 ```
 
 From `<template>/optional/cloud/` (cloud only):
@@ -209,8 +222,12 @@ project's CI config or docs and say they are unverified.
 **`factory/config.json`.**
 
 - `base_branch`: the default branch.
-- `merge_method`: `merge`, `squash` or `rebase`, one the repo allows
-  (`gh api repos/<owner>/<repo> --jq '{allow_merge_commit, allow_squash_merge, allow_rebase_merge}'`).
+- `forge`: `{"type": "github"}`, or for Gitea
+  `{"type": "gitea", "url": "<the address people open in a browser>"}`, such
+  as `https://git.example.com`. The token never goes here.
+- `merge_method`: `merge`, `squash` or `rebase`, one the repo allows (GitHub:
+  `gh api repos/<owner>/<repo> --jq '{allow_merge_commit, allow_squash_merge, allow_rebase_merge}'`;
+  Gitea: the repository's settings page, under pull requests).
 - `protected_paths`: keep the factory entries and don't add the project's
   tests. Features legitimately change existing tests, and a protected test
   blocks the job with no way through. The code reviewer catches weakened or
@@ -248,15 +265,20 @@ Each job works in its own git worktree, a full checkout of the repo at
 `.worktrees/<job-id>` (gitignored). A tool run from the repo root that doesn't
 read `.gitignore` sees those copies too; exclude `.worktrees/` in its config.
 
-The factory and its agents reach GitHub only through `gh api` on REST paths,
-because Claude Code cloud sessions refuse GraphQL. With
+The factory reaches GitHub or Gitea (`forge` in `factory/config.json`) only
+through `factory/bin/job`: `gh api` on REST paths for GitHub, because Claude
+Code cloud sessions refuse GraphQL, and the REST API with `GITEA_TOKEN` for
+Gitea. With
 `FACTORY_STATE_BRANCH=factory-state` set, every save also publishes the job's
 `job.json` and `*.md` files to that branch; follow a factory running elsewhere
 with `FACTORY_STATE_BRANCH=factory-state factory/bin/store serve` and
 http://127.0.0.1:8001/dashboard.html.
 ```
 
-**Labels.** Create them on GitHub:
+**Labels.** Create the three labels. On Gitea, create them with the same
+names, colours and descriptions on the repository's Labels page, or with
+`curl -fsS -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/json" -d '{"name": "<name>", "color": "#<colour>", "description": "<text>"}' <url>/api/v1/repos/<owner>/<repo>/labels`
+for each. On GitHub:
 
 ```bash
 gh label create factory --color 5319E7 --description "Build this with the software factory"
@@ -348,10 +370,12 @@ factory/bin/gate
 factory/bin/route
 factory/bin/store
 factory/bin/portable.py
+factory/bin/gitea.py
 factory/tests/test_job.py
 factory/tests/test_gate.py
 factory/tests/test_store.py
 factory/tests/test_portable.py
+factory/tests/test_gitea.py
 ```
 
 Leave what the project adapted: `.claude/agents/`, `factory/checks.sh` and
